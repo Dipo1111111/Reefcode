@@ -168,6 +168,22 @@ const CodemodeSettingsSchema = Type.Object({
 	),
 });
 
+const SafetySettingsSchema = Type.Object({
+	tier: Type.Optional(
+		Type.Union([Type.Literal("none"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high")], {
+			description:
+				"Autonomy tier for the safety floor. `none` reads only, `low` writes inside the project and asks before shell commands, `medium` runs shell commands except the built-in block rules, `high` also allows remote writes.",
+			default: SETTINGS_DEFAULTS.safety.tier,
+		}),
+	),
+	skipApprovals: Type.Optional(
+		Type.Boolean({
+			description: "Skip `ask` decisions. Never skips `block`.",
+			default: SETTINGS_DEFAULTS.safety.skipApprovals,
+		}),
+	),
+});
+
 const PackageSourceSchema = Type.Union(
 	[
 		Type.String({ description: "Load all resources from the package." }),
@@ -398,6 +414,7 @@ export const SettingsSchema = Type.Object(
 		markdown: Type.Optional(MarkdownSettingsSchema),
 		warnings: Type.Optional(WarningSettingsSchema),
 		codemode: Type.Optional(CodemodeSettingsSchema),
+		safety: Type.Optional(SafetySettingsSchema),
 		sessionDir: Type.Optional(
 			Type.String({
 				description: "Custom session storage directory, in the same format as the --session-dir CLI flag.",
