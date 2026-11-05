@@ -1,5 +1,5 @@
 /**
- * Presentation for the codemode tool.
+ * Presentation for the `script` tool.
  *
  * The call shows the script; the result lists the nested tool calls with their status as they
  * run and the cost of its model calls, followed by the script output without the "Script completed"
@@ -10,6 +10,7 @@
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import type { ToolDefinition } from "../../core/extensions/types.ts";
 import { getTextOutput, replaceTabs, startToolTimer, str, toolTimerText } from "../../core/tools/render-utils.ts";
+import { CODEMODE_TOOL_NAME } from "./tool.ts";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
 import { CodeHighlighter, type Theme } from "../../modes/interactive/theme/theme.ts";
@@ -76,7 +77,8 @@ export const codemodeRenderers: Pick<
 		startToolTimer(context);
 		// The code includes the `// @options:` line, so options show as part of the script.
 		const code = str((args as { code?: unknown } | undefined)?.code);
-		const title = theme.fg("toolTitle", theme.bold("codemode"));
+		// The tool is `script`: the row must use the name the model called and the user read.
+	const title = theme.fg("toolTitle", theme.bold(CODEMODE_TOOL_NAME));
 		const component = (context.lastComponent as Container | undefined) ?? new Container();
 		component.clear();
 		if (code === null) {

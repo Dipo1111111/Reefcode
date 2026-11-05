@@ -165,7 +165,7 @@ export const MAX_SERVERS_SECTION_CHARS = 4096;
 /** The section's first line. It explains only the ways of reaching tools that the listed servers use. */
 function serversSectionIntro(reaches: ReadonlySet<string>): string {
 	let intro = "MCP servers whose tools are not declared to you.";
-	if (reaches.has("codemode")) intro += " Call the tools of `codemode` servers from codemode scripts.";
+	if (reaches.has("codemode")) intro += " Call the tools of `codemode` servers from a `script`.";
 	if (reaches.has("tool_search")) intro += " Load the tools of `tool_search` servers with `tool_search`.";
 	return intro;
 }

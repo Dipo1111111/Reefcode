@@ -686,6 +686,12 @@ function createDiscoveryGlobals(
 			spread: true,
 			execute: (args) => {
 				const [query, searchOptions] = args as [unknown, { limit?: unknown; namespace?: unknown } | undefined];
+				// A bare `searchTools()` means "what is there?". That is a reasonable question, and
+				// failing it costs the model a whole turn plus an error block in the transcript, so it
+				// answers with every tool instead of throwing.
+				if (query === undefined || query === null) {
+					return tools.map((tool) => entry(tool.name));
+				}
 				if (typeof query !== "string") throw new Error("searchTools() expects a query string");
 				const limit = searchOptions?.limit ?? DEFAULT_TOOL_SEARCH_LIMIT;
 				if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
@@ -708,6 +714,9 @@ function createDiscoveryGlobals(
 			spread: true,
 			execute: (args) => {
 				const [name] = args as unknown[];
+				// `describeTool()` alone lists the names, which is what a caller with no argument is
+				// asking for. Naming one that does not exist still returns undefined, as documented.
+				if (name === undefined || name === null) return tools.map((tool) => toCodemodeIdentifier(tool.name));
 				if (typeof name !== "string") throw new Error("describeTool() expects a tool name");
 				const tool = tools.find(
 					(candidate) => candidate.name === name || toCodemodeIdentifier(candidate.name) === name,
@@ -720,6 +729,17 @@ function createDiscoveryGlobals(
 			spread: true,
 			execute: (args) => {
 				const [name] = args as unknown[];
+				if (name === undefined || name === null) {
+					const namespaces = new Map<string, string[]>();
+					for (const tool of tools) {
+						const toolNamespace = options.getToolNamespace?.(tool.name);
+						if (!toolNamespace) continue;
+						const existing = namespaces.get(toolNamespace.name) ?? [];
+						existing.push(toCodemodeIdentifier(tool.name));
+						namespaces.set(toolNamespace.name, existing);
+					}
+					return [...namespaces].map(([namespaceName, names]) => ({ name: namespaceName, tools: names }));
+				}
 				if (typeof name !== "string") throw new Error("describeNamespace() expects a namespace name");
 				let namespace: ToolNamespace | undefined;
 				const names: string[] = [];

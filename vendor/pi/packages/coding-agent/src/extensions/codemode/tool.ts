@@ -167,7 +167,7 @@ function describeGlobals(models: boolean): string {
 		"- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. With several text items, each starts with a `==> text N/M <==` line, and `console` lines follow the other output in one `<console_output>` block. `image()` also saves the image to a temp file and the result names its path.",
 		"- `inputs.<name>` holds each `// @input:` block as a string; the object is frozen and never contains anything else.",
 		"- `store(key, value)` and `load(key)` keep JSON values across script calls.",
-		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
+		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools. The tools listed below are already available to you; do not spend a call listing them.",
 	];
 	if (models) {
 		lines.push(`- \`models\`: classifiers and image generation. Read ${CODEMODE_DOCS_PATH} first.`);

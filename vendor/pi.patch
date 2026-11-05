@@ -2465,8 +2465,33 @@ index 0000000..e61b14a
 +		expect(createCodemodeDescription(tools, { compact: true })).toContain("describeTool(name)");
 +	});
 +});
+diff --git a/packages/coding-agent/src/extensions/codemode/discovery.test.ts b/packages/coding-agent/src/extensions/codemode/discovery.test.ts
+new file mode 100644
+index 0000000..893351c
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/codemode/discovery.test.ts
+@@ -0,0 +1,19 @@
++import { describe, expect, it } from "vitest";
++import { createCodemodeDescription } from "./tool.ts";
++
++/**
++ * The discovery globals used to throw when called with no argument. A model asking "what is there?"
++ * is a reasonable question, and the throw cost it a whole turn plus an error block in the transcript.
++ * The behaviour is checked through the description and through the executor below.
++ */
++
++describe("discovery guidance", () => {
++	it("tells the model the tools are already listed, so it does not spend a call listing them", () => {
++		const text = createCodemodeDescription(
++			[{ name: "read", description: "Read a file.", parameters: { type: "object", properties: {} } } as never],
++			{ compact: true },
++		);
++		expect(text).toContain("already available");
++		expect(text).toContain("do not spend a call listing them");
++	});
++});
 diff --git a/packages/coding-agent/src/extensions/codemode/execute.ts b/packages/coding-agent/src/extensions/codemode/execute.ts
-index b363599..a9e2b0a 100644
+index b363599..99fa432 100644
 --- a/packages/coding-agent/src/extensions/codemode/execute.ts
 +++ b/packages/coding-agent/src/extensions/codemode/execute.ts
 @@ -20,7 +20,7 @@ import {
@@ -2538,6 +2563,47 @@ index b363599..a9e2b0a 100644
  	const details = snapshot();
  	if (truncated.fullOutputPath) details.fullOutputPath = truncated.fullOutputPath;
  	return {
+@@ -679,6 +686,12 @@ function createDiscoveryGlobals(
+ 			spread: true,
+ 			execute: (args) => {
+ 				const [query, searchOptions] = args as [unknown, { limit?: unknown; namespace?: unknown } | undefined];
++				// A bare `searchTools()` means "what is there?". That is a reasonable question, and
++				// failing it costs the model a whole turn plus an error block in the transcript, so it
++				// answers with every tool instead of throwing.
++				if (query === undefined || query === null) {
++					return tools.map((tool) => entry(tool.name));
++				}
+ 				if (typeof query !== "string") throw new Error("searchTools() expects a query string");
+ 				const limit = searchOptions?.limit ?? DEFAULT_TOOL_SEARCH_LIMIT;
+ 				if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+@@ -701,6 +714,9 @@ function createDiscoveryGlobals(
+ 			spread: true,
+ 			execute: (args) => {
+ 				const [name] = args as unknown[];
++				// `describeTool()` alone lists the names, which is what a caller with no argument is
++				// asking for. Naming one that does not exist still returns undefined, as documented.
++				if (name === undefined || name === null) return tools.map((tool) => toCodemodeIdentifier(tool.name));
+ 				if (typeof name !== "string") throw new Error("describeTool() expects a tool name");
+ 				const tool = tools.find(
+ 					(candidate) => candidate.name === name || toCodemodeIdentifier(candidate.name) === name,
+@@ -713,6 +729,17 @@ function createDiscoveryGlobals(
+ 			spread: true,
+ 			execute: (args) => {
+ 				const [name] = args as unknown[];
++				if (name === undefined || name === null) {
++					const namespaces = new Map<string, string[]>();
++					for (const tool of tools) {
++						const toolNamespace = options.getToolNamespace?.(tool.name);
++						if (!toolNamespace) continue;
++						const existing = namespaces.get(toolNamespace.name) ?? [];
++						existing.push(toCodemodeIdentifier(tool.name));
++						namespaces.set(toolNamespace.name, existing);
++					}
++					return [...namespaces].map(([namespaceName, names]) => ({ name: namespaceName, tools: names }));
++				}
+ 				if (typeof name !== "string") throw new Error("describeNamespace() expects a namespace name");
+ 				let namespace: ToolNamespace | undefined;
+ 				const names: string[] = [];
 diff --git a/packages/coding-agent/src/extensions/codemode/index.ts b/packages/coding-agent/src/extensions/codemode/index.ts
 index 67492b6..2936143 100644
 --- a/packages/coding-agent/src/extensions/codemode/index.ts
@@ -2770,8 +2836,37 @@ index 0000000..f739dd6
 +	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
 +	return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 +}
+diff --git a/packages/coding-agent/src/extensions/codemode/renderer.ts b/packages/coding-agent/src/extensions/codemode/renderer.ts
+index 660803e..2b534f4 100644
+--- a/packages/coding-agent/src/extensions/codemode/renderer.ts
++++ b/packages/coding-agent/src/extensions/codemode/renderer.ts
+@@ -1,5 +1,5 @@
+ /**
+- * Presentation for the codemode tool.
++ * Presentation for the `script` tool.
+  *
+  * The call shows the script; the result lists the nested tool calls with their status as they
+  * run and the cost of its model calls, followed by the script output without the "Script completed"
+@@ -10,6 +10,7 @@
+ import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+ import type { ToolDefinition } from "../../core/extensions/types.ts";
+ import { getTextOutput, replaceTabs, startToolTimer, str, toolTimerText } from "../../core/tools/render-utils.ts";
++import { CODEMODE_TOOL_NAME } from "./tool.ts";
+ import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
+ import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
+ import { CodeHighlighter, type Theme } from "../../modes/interactive/theme/theme.ts";
+@@ -76,7 +77,8 @@ export const codemodeRenderers: Pick<
+ 		startToolTimer(context);
+ 		// The code includes the `// @options:` line, so options show as part of the script.
+ 		const code = str((args as { code?: unknown } | undefined)?.code);
+-		const title = theme.fg("toolTitle", theme.bold("codemode"));
++		// The tool is `script`: the row must use the name the model called and the user read.
++	const title = theme.fg("toolTitle", theme.bold(CODEMODE_TOOL_NAME));
+ 		const component = (context.lastComponent as Container | undefined) ?? new Container();
+ 		component.clear();
+ 		if (code === null) {
 diff --git a/packages/coding-agent/src/extensions/codemode/tool.ts b/packages/coding-agent/src/extensions/codemode/tool.ts
-index 648ba61..8088625 100644
+index 648ba61..b649816 100644
 --- a/packages/coding-agent/src/extensions/codemode/tool.ts
 +++ b/packages/coding-agent/src/extensions/codemode/tool.ts
 @@ -33,10 +33,13 @@ import type { ModelRegistry } from "../../core/model-registry.ts";
@@ -2818,7 +2913,7 @@ index 648ba61..8088625 100644
  	}),
  });
  
-@@ -105,26 +115,58 @@ export interface CodemodeToolDetails {
+@@ -105,27 +115,59 @@ export interface CodemodeToolDetails {
  	fullOutputPath?: string;
  }
  
@@ -2878,11 +2973,13 @@ index 648ba61..8088625 100644
  		"Globals:",
  		"- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. With several text items, each starts with a `==> text N/M <==` line, and `console` lines follow the other output in one `<console_output>` block. `image()` also saves the image to a temp file and the result names its path.",
 -		"- `store(key, value)` and `load(key)` keep JSON values across codemode calls.",
+-		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
 +		"- `inputs.<name>` holds each `// @input:` block as a string; the object is frozen and never contains anything else.",
 +		"- `store(key, value)` and `load(key)` keep JSON values across script calls.",
- 		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
++		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools. The tools listed below are already available to you; do not spend a call listing them.",
  	];
  	if (models) {
+ 		lines.push(`- \`models\`: classifiers and image generation. Read ${CODEMODE_DOCS_PATH} first.`);
 @@ -161,6 +203,13 @@ export function getCodemodeCallableTools(tools: readonly AgentTool<any>[]): Agen
  }
  
@@ -3462,6 +3559,19 @@ index 1e3b9ce..8dea93a 100644
  			allowNetwork: true,
  			signal,
  		});
+diff --git a/packages/coding-agent/src/extensions/mcp/index.ts b/packages/coding-agent/src/extensions/mcp/index.ts
+index f271170..0f8d894 100644
+--- a/packages/coding-agent/src/extensions/mcp/index.ts
++++ b/packages/coding-agent/src/extensions/mcp/index.ts
+@@ -165,7 +165,7 @@ export const MAX_SERVERS_SECTION_CHARS = 4096;
+ /** The section's first line. It explains only the ways of reaching tools that the listed servers use. */
+ function serversSectionIntro(reaches: ReadonlySet<string>): string {
+ 	let intro = "MCP servers whose tools are not declared to you.";
+-	if (reaches.has("codemode")) intro += " Call the tools of `codemode` servers from codemode scripts.";
++	if (reaches.has("codemode")) intro += " Call the tools of `codemode` servers from a `script`.";
+ 	if (reaches.has("tool_search")) intro += " Load the tools of `tool_search` servers with `tool_search`.";
+ 	return intro;
+ }
 diff --git a/packages/coding-agent/src/extensions/mcp/oauth.ts b/packages/coding-agent/src/extensions/mcp/oauth.ts
 index 5a6aba3..faf7237 100644
 --- a/packages/coding-agent/src/extensions/mcp/oauth.ts
