@@ -2,7 +2,9 @@ import { compare, valid } from "semver";
 import { fetchWithRetry } from "./management-http.ts";
 import { getPiUserAgent } from "./pi-user-agent.ts";
 
-const LATEST_VERSION_URL = "https://pi.dev/api/latest-version";
+// The release this product ships is the npm package, so ask npm. The old endpoint answered for a
+// different project entirely and told REEF users to install a version that is not REEF's.
+const LATEST_VERSION_URL = process.env.REEF_LATEST_VERSION_URL || "https://registry.npmjs.org/reef-code/latest";
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
 
 export interface LatestPiRelease {

@@ -7670,7 +7670,7 @@ index 0000000..7f8c48e
 +	return `${fg(TEAL)}REEF${RESET}`;
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index 268a7fa..67c592a 100644
+index 268a7fa..8ed1519 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 @@ -151,7 +151,8 @@ import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
@@ -7870,7 +7870,31 @@ index 268a7fa..67c592a 100644
  		const resumeCommand = formatResumeCommand(this.sessionManager);
  		if (resumeCommand) {
  			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
-@@ -4898,6 +4945,34 @@ export class InteractiveMode {
+@@ -4768,13 +4815,8 @@ export class InteractiveMode {
+ 		const updateInstruction = () =>
+ 			theme.fg("muted", `New version ${release.version} is available. Run `) +
+ 			theme.fg("accent", `${APP_NAME} update`);
+-		const changelogUrl = "https://pi.dev/changelog";
+-		const changelogLine = () => {
+-			const changelogLink = getCapabilities().hyperlinks
+-				? hyperlink(theme.fg("accent", changelogUrl), changelogUrl)
+-				: theme.fg("accent", changelogUrl);
+-			return theme.fg("muted", "Changelog: ") + changelogLink;
+-		};
++		// There is no changelog site to link yet; a link to someone else's changelog is worse than
++		// no link, so the line only appears when the release carries its own note.
+ 		const note = release.note?.trim();
+ 
+ 		this.chatContainer.addChild(new Spacer(1));
+@@ -4789,7 +4831,6 @@ export class InteractiveMode {
+ 			);
+ 			this.chatContainer.addChild(new Spacer(1));
+ 		}
+-		this.chatContainer.addChild(new ThemedText(changelogLine, 1, 0));
+ 		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
+ 		this.ui.requestRender();
+ 	}
+@@ -4898,6 +4939,34 @@ export class InteractiveMode {
  		this.showStatus("Queued message for after compaction");
  	}
  
@@ -7905,7 +7929,7 @@ index 268a7fa..67c592a 100644
  	private isExtensionCommand(text: string): boolean {
  		if (!text.startsWith("/")) return false;
  
-@@ -7214,6 +7289,25 @@ export class InteractiveMode {
+@@ -7214,6 +7283,25 @@ export class InteractiveMode {
  	private async handleCompactCommand(customInstructions?: string): Promise<void> {
  		this.clearStatusIndicator();
  
@@ -8195,10 +8219,21 @@ index a57c4de..6a04d92 100644
  	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
  }
 diff --git a/packages/coding-agent/src/utils/version-check.ts b/packages/coding-agent/src/utils/version-check.ts
-index a09a3d0..0a4f5ac 100644
+index a09a3d0..1847eab 100644
 --- a/packages/coding-agent/src/utils/version-check.ts
 +++ b/packages/coding-agent/src/utils/version-check.ts
-@@ -52,7 +52,7 @@ export async function getLatestPiRelease(
+@@ -2,7 +2,9 @@ import { compare, valid } from "semver";
+ import { fetchWithRetry } from "./management-http.ts";
+ import { getPiUserAgent } from "./pi-user-agent.ts";
+ 
+-const LATEST_VERSION_URL = "https://pi.dev/api/latest-version";
++// The release this product ships is the npm package, so ask npm. The old endpoint answered for a
++// different project entirely and told REEF users to install a version that is not REEF's.
++const LATEST_VERSION_URL = process.env.REEF_LATEST_VERSION_URL || "https://registry.npmjs.org/reef-code/latest";
+ const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
+ 
+ export interface LatestPiRelease {
+@@ -52,7 +54,7 @@ export async function getLatestPiRelease(
  	currentVersion: string,
  	options: { timeoutMs?: number; retry?: boolean } = {},
  ): Promise<LatestPiRelease | undefined> {
@@ -8207,7 +8242,7 @@ index a09a3d0..0a4f5ac 100644
  
  	const response = await fetchWithRetry(
  		LATEST_VERSION_URL,
-@@ -95,7 +95,7 @@ export async function getLatestPiVersion(
+@@ -95,7 +97,7 @@ export async function getLatestPiVersion(
  }
  
  export async function checkForNewPiVersion(currentVersion: string): Promise<LatestPiRelease | undefined> {

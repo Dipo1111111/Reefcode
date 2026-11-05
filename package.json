@@ -14,7 +14,8 @@
     "brand:check": "scripts/brand-check.sh",
     "patch:check": "scripts/patch-check.sh",
     "package": "scripts/package.sh",
-    "install:local": "scripts/package.sh --install"
+    "install:local": "scripts/package.sh --install",
+    "publish": "scripts/publish.sh"
   },
   "engines": {
     "node": ">=22"
