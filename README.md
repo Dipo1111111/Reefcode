@@ -91,7 +91,7 @@ Policy files: `~/.reef/agent/policy.json`, then project `./.reef/policy.json`, t
 | `reef search` | search sessions |
 | `reef permissions …` | inspect and lint the safety floor |
 | `reef --list-models` | models this install can reach |
-| `reef update` | update REEF, extensions and model catalogs |
+| `reef update` | update REEF from npm, plus extensions and model catalogs |
 
 Inside a session: `/cost` (spend and cache), `/context` (what a request contains), `/trace` (the
 request compiler's budget report), `/model`, `/skills`, `/safety`, `/doctor`.
@@ -119,6 +119,22 @@ Same model, same scenarios, script surface versus direct tools — the only diff
 | real (16 runs) | 35,484 tok · 6.75 req | 43,865 tok · 8.13 req | **−19.1% tokens, −17% requests** |
 
 Pass rates: 96% and 100%. Reproduce with `evals/run.mjs --suite micro --script off`.
+
+## Status
+
+`0.1.3`. What changed since the first release:
+
+- `reef doctor` is a real command (it used to be sent to the model as a prompt, which cost tokens
+  and returned a guessed answer).
+- `reef update` installs `reef-code` from npm. It previously read a third-party release feed and
+  could install a different package entirely.
+- The update check asks npm for `reef-code`; no changelog link.
+- No install telemetry. Nothing is reported to any host on launch.
+- Footer: `16.1% / 1.0M` instead of a meter, plus throughput in tokens per second.
+- The input box empties the moment a message is accepted.
+
+Source: [github.com/Dipo1111111/Reefcode](https://github.com/Dipo1111111/Reefcode).
+Pull requests are required for `main`; see the repository settings.
 
 ## License
 
