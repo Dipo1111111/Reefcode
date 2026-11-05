@@ -507,16 +507,17 @@ index 5a9552d..2ac0a85 100644
  }
  
 diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
-index a0dda03..c4f7379 100644
+index a0dda03..9ccd119 100644
 --- a/packages/coding-agent/src/core/agent-session.ts
 +++ b/packages/coding-agent/src/core/agent-session.ts
-@@ -80,6 +80,13 @@ import {
+@@ -80,6 +80,14 @@ import {
  	shouldCompact,
  } from "./compaction/index.ts";
  import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 +import {
 +	applySectionBudgets,
 +	type BudgetResult,
++	type CacheBreak,
 +	formatAudit,
 +	type RequestAudit,
 +	RequestAuditor,
@@ -524,7 +525,7 @@ index a0dda03..c4f7379 100644
  import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
  import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
  import {
-@@ -496,6 +503,26 @@ export class AgentSession {
+@@ -496,6 +504,30 @@ export class AgentSession {
  	private _toolPromptGuidelines: Map<string, string[]> = new Map();
  
  	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
@@ -532,6 +533,8 @@ index a0dda03..c4f7379 100644
 +	private readonly _requestAuditor = new RequestAuditor();
 +	private _lastBudget: BudgetResult | undefined;
 +	private _lastAudit: RequestAudit | undefined;
++	/** A cache break that is expected to happen on the next request, and why. */
++	private _pendingCacheBreak: CacheBreak | undefined;
 +
 +	/** Snapshot the request that is about to be sent, and say so when it breaks the cache contract. */
 +	private _recordRequestAudit(messages: readonly AgentMessage[]): void {
@@ -541,7 +544,9 @@ index a0dda03..c4f7379 100644
 +			messages,
 +			truncated: this._lastBudget?.truncated,
 +			extraTokens: { schemas: Math.round(JSON.stringify(this.agent.state.tools).length / 3.6) },
++			breakReason: this._pendingCacheBreak,
 +		});
++		this._pendingCacheBreak = undefined;
 +		this._lastAudit = audit;
 +		if (process.env.REEF_TRACE === "1") process.stderr.write(`[reef] ${formatAudit(audit)}\n`);
 +		for (const violation of audit.violations) {
@@ -551,7 +556,7 @@ index a0dda03..c4f7379 100644
  	/** Prompt options after before_agent_start mutations for the active run. */
  	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
  
-@@ -935,6 +962,9 @@ export class AgentSession {
+@@ -935,6 +967,9 @@ export class AgentSession {
  			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
  			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
  			this._runSystemPromptOptions = options;
@@ -561,7 +566,7 @@ index a0dda03..c4f7379 100644
  
  			return {
  				...previousSnapshot,
-@@ -1604,9 +1634,17 @@ export class AgentSession {
+@@ -1604,9 +1639,17 @@ export class AgentSession {
  	 * `codemode` or `deferred` tool.
  	 */
  	private _getCallableTools(active: ReadonlySet<string> = new Set(this.getActiveToolNames())): AgentTool[] {
@@ -580,7 +585,7 @@ index a0dda03..c4f7379 100644
  		});
  	}
  
-@@ -1664,7 +1702,9 @@ export class AgentSession {
+@@ -1664,7 +1707,9 @@ export class AgentSession {
  			});
  		}
  		this._hiddenDeclarations = hidden;
@@ -591,7 +596,7 @@ index a0dda03..c4f7379 100644
  		return declared;
  	}
  
-@@ -1791,10 +1831,9 @@ export class AgentSession {
+@@ -1791,10 +1836,9 @@ export class AgentSession {
  		options.selectedTools = this._applyToolLoadout(options.selectedTools).map((tool) => tool.name);
  		// The tool list and rules must match the declarations the request carries.
  		options.hiddenTools = [...this._hiddenDeclarations];
@@ -605,7 +610,7 @@ index a0dda03..c4f7379 100644
  		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
  	}
  
-@@ -2002,6 +2041,8 @@ export class AgentSession {
+@@ -2002,6 +2046,8 @@ export class AgentSession {
  		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
  		this._runSystemPromptOptions = result.systemPromptOptions;
  		if (updateMessage) messages.unshift(updateMessage);
@@ -614,7 +619,52 @@ index a0dda03..c4f7379 100644
  		return messages;
  	}
  
-@@ -3586,6 +3627,8 @@ export class AgentSession {
+@@ -2887,9 +2933,44 @@ export class AgentSession {
+ 	 *
+ 	 * @param customInstructions Optional instructions for the compaction summary
+ 	 */
++	/**
++	 * What a compaction would do, without doing it.
++	 *
++	 * `/compact` shows these numbers before it touches the transcript, because a compaction is a
++	 * declared cache break and the user should see the size of it.
++	 */
++	previewCompaction(): {
++		tokensBefore: number;
++		messagesToSummarize: number;
++		messagesKept: number;
++		estimateSummaryTokens: number;
++		estimateAfter: number;
++		updateOfPreviousSummary: boolean;
++		fileOperations: number;
++	} | undefined {
++		const model = this.model;
++		if (!model) return undefined;
++		const settings = this.settingsManager.getCompactionSettings(model);
++		const pathEntries = this.sessionManager.getBranch();
++		const preparation = prepareCompaction(pathEntries, settings);
++		if (!preparation) return undefined;
++		const summarized = preparation.messagesToSummarize.length + preparation.turnPrefixMessages.length;
++		const estimateSummaryTokens = Math.min(settings.keepRecentTokens, Math.round(preparation.tokensBefore * 0.15));
++		return {
++			tokensBefore: preparation.tokensBefore,
++			messagesToSummarize: summarized,
++			messagesKept: this.agent.state.messages.length - summarized,
++			estimateSummaryTokens,
++			estimateAfter: estimateSummaryTokens + settings.keepRecentTokens,
++			updateOfPreviousSummary: preparation.previousSummary !== undefined,
++			fileOperations: preparation.fileOps ? Object.keys(preparation.fileOps).length : 0,
++		};
++	}
++
+ 	async compact(customInstructions?: string): Promise<CompactionResult> {
+ 		await this.abort();
+ 		this._compactionAbortController = new AbortController();
++		this._pendingCacheBreak = "compaction";
+ 		this._emit({ type: "compaction_start", reason: "manual" });
+ 		let fromExtension = false;
+ 		let cancelledByExtension = false;
+@@ -3586,6 +3667,8 @@ export class AgentSession {
  				},
  				getSystemPrompt: () => this.systemPrompt,
  				getSystemPromptOptions: () => this._baseSystemPromptOptions,
@@ -1693,10 +1743,10 @@ index 67492b6..3ebc8c1 100644
  }
 diff --git a/packages/coding-agent/src/extensions/codemode/jobs.ts b/packages/coding-agent/src/extensions/codemode/jobs.ts
 new file mode 100644
-index 0000000..8230e63
+index 0000000..f739dd6
 --- /dev/null
 +++ b/packages/coding-agent/src/extensions/codemode/jobs.ts
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,134 @@
 +/**
 + * Background script jobs. A `script` call whose source carries
 + * `// @script: {"startInBackground": true}` returns as soon as it starts, and the run continues
@@ -1717,7 +1767,11 @@ index 0000000..8230e63
 +	fullOutputPath?: string;
 +}
 +
-+export interface ScriptJob {
++/**
++ * One background run. Generic over the detail its tool result carries, so a subagent task can use
++ * the same registry as a script instead of growing a second one.
++ */
++export interface BackgroundJob<TDetail = ScriptJobDetail> {
 +	id: string;
 +	/** The tool call that started it, so a resumed session can match it. */
 +	sourceToolCallId: string;
@@ -1728,9 +1782,11 @@ index 0000000..8230e63
 +	calls: number;
 +	/** Whether a caller is already waiting, so completion does not need a wake message. */
 +	awaiting: boolean;
-+	promise: Promise<AgentToolResult<ScriptJobDetail>>;
++	promise: Promise<AgentToolResult<TDetail>>;
 +	abort: AbortController;
 +}
++
++export type ScriptJob = BackgroundJob<ScriptJobDetail>;
 +
 +/** Session custom-entry type holding one job's start and finish. */
 +export const SCRIPT_JOB_ENTRY_TYPE = "script-job";
@@ -1744,7 +1800,7 @@ index 0000000..8230e63
 +	calls: number;
 +}
 +
-+const jobs = new Map<string, ScriptJob>();
++const jobs = new Map<string, BackgroundJob<unknown>>();
 +let counter = 0;
 +
 +export function newJobId(): string {
@@ -1752,34 +1808,34 @@ index 0000000..8230e63
 +	return `job-${counter}-${Math.random().toString(36).slice(2, 8)}`;
 +}
 +
-+export function createJob(id: string, sourceToolCallId: string, abort: AbortController): ScriptJob {
-+	const job: ScriptJob = {
++export function createJob<TDetail>(id: string, sourceToolCallId: string, abort: AbortController): BackgroundJob<TDetail> {
++	const job: BackgroundJob<TDetail> = {
 +		id,
 +		sourceToolCallId,
 +		startedAt: Date.now(),
 +		status: "running",
 +		calls: 0,
 +		awaiting: false,
-+		promise: Promise.resolve({ content: [], details: { calls: [] } }),
++		promise: Promise.resolve({ content: [], details: {} as TDetail }),
 +		abort,
 +	};
-+	jobs.set(id, job);
++	jobs.set(id, job as BackgroundJob<unknown>);
 +	return job;
 +}
 +
-+export function getJob(id: string): ScriptJob | undefined {
-+	return jobs.get(id);
++export function getJob<TDetail = ScriptJobDetail>(id: string): BackgroundJob<TDetail> | undefined {
++	return jobs.get(id) as BackgroundJob<TDetail> | undefined;
 +}
 +
-+export function listJobs(): ScriptJob[] {
-+	return [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
++export function listJobs(): BackgroundJob<never>[] {
++	return [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt) as BackgroundJob<never>[];
 +}
 +
-+export function runningJobs(): ScriptJob[] {
++export function runningJobs(): BackgroundJob<never>[] {
 +	return listJobs().filter((job) => job.status === "running");
 +}
 +
-+export function finishJob(job: ScriptJob, status: ScriptJobStatus): void {
++export function finishJob(job: BackgroundJob<unknown>, status: ScriptJobStatus): void {
 +	if (job.status !== "running") return;
 +	job.status = status;
 +	job.finishedAt = Date.now();
@@ -1792,12 +1848,12 @@ index 0000000..8230e63
 +		if (job.status !== "running") continue;
 +		job.status = "interrupted";
 +		job.finishedAt = Date.now();
-+		interrupted.push(toEntryData(job));
++		interrupted.push(toEntryData(job as BackgroundJob<ScriptJobDetail>));
 +	}
 +	return interrupted;
 +}
 +
-+export function toEntryData(job: ScriptJob): ScriptJobEntryData {
++export function toEntryData(job: BackgroundJob<unknown>): ScriptJobEntryData {
 +	return {
 +		id: job.id,
 +		sourceToolCallId: job.sourceToolCallId,
@@ -2227,25 +2283,27 @@ index 0000000..be1fc40
 +	};
 +}
 diff --git a/packages/coding-agent/src/extensions/index.ts b/packages/coding-agent/src/extensions/index.ts
-index 81461dd..18a60d0 100644
+index 81461dd..b3ac87c 100644
 --- a/packages/coding-agent/src/extensions/index.ts
 +++ b/packages/coding-agent/src/extensions/index.ts
-@@ -2,6 +2,8 @@ import type { InlineExtension } from "../core/extensions/types.ts";
+@@ -2,6 +2,9 @@ import type { InlineExtension } from "../core/extensions/types.ts";
  import codemodeExtension from "./codemode/index.ts";
  import llamaExtension from "./llama/index.ts";
  import mcpExtension from "./mcp/index.ts";
 +import safetyExtension from "./safety/index.ts";
 +import reefStatsExtension from "./reef-stats/index.ts";
++import tasksExtension from "./tasks/index.ts";
  import toolSearchExtension from "./tool-search/index.ts";
  
  export const builtInExtensions: InlineExtension[] = [
-@@ -11,4 +13,7 @@ export const builtInExtensions: InlineExtension[] = [
+@@ -11,4 +14,8 @@ export const builtInExtensions: InlineExtension[] = [
  	{ name: "codemode", factory: codemodeExtension, replaceable: true, builtin: true },
  	{ name: "tool-search", factory: toolSearchExtension, replaceable: true, builtin: true },
  	{ name: "mcp", factory: mcpExtension, replaceable: true, builtin: true },
 +	// The safety floor. Not replaceable: a third-party extension must not be able to remove it.
 +	{ name: "safety", factory: safetyExtension, builtin: true },
 +	{ name: "reef-stats", factory: reefStatsExtension, builtin: true },
++	{ name: "tasks", factory: tasksExtension, builtin: true },
  ];
 diff --git a/packages/coding-agent/src/extensions/llama/index.ts b/packages/coding-agent/src/extensions/llama/index.ts
 index 1e3b9ce..8dea93a 100644
@@ -2303,12 +2361,101 @@ index 5a6aba3..faf7237 100644
  		const authorization = await startMcpSignIn(signIn);
  		if (authorization.kind === "authorized") return;
  		prompt.showAuthorizationUrl(new URL(authorization.authorizationUrl));
+diff --git a/packages/coding-agent/src/extensions/reef-stats/cost.test.ts b/packages/coding-agent/src/extensions/reef-stats/cost.test.ts
+new file mode 100644
+index 0000000..b79ac6c
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/reef-stats/cost.test.ts
+@@ -0,0 +1,83 @@
++import { describe, expect, test } from "vitest";
++import { formatCost, summarizeCost } from "./index.ts";
++
++const request = (over: Record<string, unknown> = {}) => ({
++	type: "custom",
++	customType: "reef-request",
++	data: {
++		promptTokens: 1655,
++		declaredTools: ["script", "wait_for_script"],
++		input: 100,
++		output: 20,
++		cacheRead: 900,
++		cacheWrite: 10,
++		reasoning: 0,
++		cost: 0.002,
++		model: "deepseek-v4.1-flash",
++		provider: "opencode-go",
++		at: 1,
++		...over,
++	},
++});
++
++const task = (over: Record<string, unknown> = {}) => ({
++	type: "custom",
++	customType: "reef-task",
++	data: { turns: 3, usage: { input: 2000, output: 100, cost: 0.004 }, ...over },
++});
++
++describe("summarizeCost", () => {
++	test("no requests means no summary", () => {
++		expect(summarizeCost([])).toBeUndefined();
++	});
++
++	test("ignores entries of other types", () => {
++		expect(summarizeCost([{ type: "message" }, { type: "custom", customType: "other", data: {} }])).toBeUndefined();
++	});
++
++	test("sums requests and computes cache reuse", () => {
++		const summary = summarizeCost([request(), request({ input: 50, cacheRead: 1000, cost: 0.001 })]);
++		expect(summary?.requests).toBe(2);
++		expect(summary?.input).toBe(150);
++		expect(summary?.cacheRead).toBe(1900);
++		// 1900 / (150 + 1900 + 20)
++		expect(summary?.reusePercent).toBeCloseTo(91.79, 1);
++	});
++
++	test("reports the last request's shape, not the first", () => {
++		const summary = summarizeCost([request(), request({ declaredTools: ["script"], promptTokens: 1600, model: "m2" })]);
++		expect(summary?.declaredTools).toEqual(["script"]);
++		expect(summary?.promptTokens).toBe(1600);
++		expect(summary?.model).toBe("m2");
++	});
++
++	test("delegated spend is attributed separately and in the total", () => {
++		const summary = summarizeCost([request(), task(), task({ usage: { input: 10, output: 5, cost: 0.001 } })]);
++		expect(summary?.tasks).toBe(2);
++		expect(summary?.taskTurns).toBe(6);
++		expect(summary?.taskInput).toBe(2010);
++		expect(summary?.delegatedCost).toBeCloseTo(0.005, 6);
++		expect(summary?.total).toBeCloseTo(0.007, 6);
++	});
++
++	test("a task entry with no usage never produces NaN", () => {
++		const summary = summarizeCost([request(), { type: "custom", customType: "reef-task", data: {} }]);
++		expect(Number.isFinite(summary!.delegatedCost)).toBe(true);
++		expect(Number.isFinite(summary!.total)).toBe(true);
++	});
++});
++
++describe("formatCost", () => {
++	test("hides the subagent block when nothing was delegated", () => {
++		const text = formatCost(summarizeCost([request()])!);
++		expect(text).toContain("Cache reuse:");
++		expect(text).not.toContain("Subagents:");
++	});
++
++	test("shows the subagent block when something was", () => {
++		const text = formatCost(summarizeCost([request(), task()])!);
++		expect(text).toContain("Subagents:     1 task(s), 3 turn(s)");
++		expect(text).toContain("Delegated:");
++		expect(text).toContain("Total:");
++	});
++});
 diff --git a/packages/coding-agent/src/extensions/reef-stats/index.ts b/packages/coding-agent/src/extensions/reef-stats/index.ts
 new file mode 100644
-index 0000000..1cc4eb6
+index 0000000..0b5bbac
 --- /dev/null
 +++ b/packages/coding-agent/src/extensions/reef-stats/index.ts
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,267 @@
 +/**
 + * Measurement, in the harness rather than in a spreadsheet.
 + *
@@ -2321,6 +2468,7 @@ index 0000000..1cc4eb6
 + */
 +
 +import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types.ts";
++import { TASK_ENTRY_TYPE as REEF_TASK_ENTRY_TYPE } from "../tasks/index.ts";
 +
 +/** Session custom-entry type holding one model call's usage. */
 +export const REEF_REQUEST_ENTRY_TYPE = "reef-request";
@@ -2449,38 +2597,8 @@ index 0000000..1cc4eb6
 +		pi.registerCommand("cost", {
 +			description: "Tokens, cache reuse, and spend for this session",
 +			handler: async (_args: string, ctx) => {
-+				const entries = readEntries(ctx.sessionManager.getBranch?.() ?? []);
-+				if (entries.length === 0) {
-+					ctx.ui?.notify?.("No model calls recorded yet.");
-+					return;
-+				}
-+				const sum = entries.reduce(
-+					(acc, entry) => ({
-+						input: acc.input + entry.input,
-+						output: acc.output + entry.output,
-+						cacheRead: acc.cacheRead + entry.cacheRead,
-+						cacheWrite: acc.cacheWrite + entry.cacheWrite,
-+						cost: acc.cost + entry.cost,
-+					}),
-+					{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
-+				);
-+				const promptTotal = sum.input + sum.cacheRead + sum.cacheWrite;
-+				const reuse = promptTotal === 0 ? 0 : (sum.cacheRead / promptTotal) * 100;
-+				const last = entries[entries.length - 1];
-+				const lines = [
-+					`Requests:      ${entries.length}`,
-+					`Input:         ${formatCount(sum.input)}`,
-+					`Output:        ${formatCount(sum.output)}`,
-+					`Cache read:    ${formatCount(sum.cacheRead)}`,
-+					`Cache write:   ${formatCount(sum.cacheWrite)}`,
-+					`Cache reuse:   ${reuse.toFixed(1)}%`,
-+					`Cost:          ${formatUsd(sum.cost)}`,
-+					"",
-+					`Declared tools: ${last.declaredTools.length ? last.declaredTools.join(", ") : "—"}`,
-+					`Prompt:        ~${formatCount(last.promptTokens)} tokens (system prompt only)`,
-+					`Model:         ${last.provider}/${last.model}`,
-+				];
-+				ctx.ui?.notify?.(lines.join("\n"));
++				const summary = summarizeCost(ctx.sessionManager.getBranch?.() ?? []);
++				ctx.ui?.notify?.(summary ? formatCost(summary) : "No model calls recorded yet.");
 +			},
 +		});
 +	};
@@ -2495,6 +2613,113 @@ index 0000000..1cc4eb6
 +		if (data && typeof data.at === "number") entries.push(data);
 +	}
 +	return entries;
++}
++
++interface ReefTaskEntry {
++	turns?: number;
++	usage?: { input?: number; output?: number; cost?: number };
++}
++
++function readTaskEntries(branch: readonly unknown[]): ReefTaskEntry[] {
++	const entries: ReefTaskEntry[] = [];
++	for (const item of branch) {
++		const entry = item as { type?: string; customType?: string; data?: unknown };
++		if (entry.type !== "custom" || entry.customType !== REEF_TASK_ENTRY_TYPE) continue;
++		const data = entry.data as ReefTaskEntry | undefined;
++		if (data && typeof data === "object") entries.push(data);
++	}
++	return entries;
++}
++
++/** Everything `/cost` reports, computed from the session branch. Pure, so it can be tested. */
++export interface CostSummary {
++	requests: number;
++	input: number;
++	output: number;
++	cacheRead: number;
++	cacheWrite: number;
++	cost: number;
++	reusePercent: number;
++	declaredTools: string[];
++	promptTokens: number;
++	model: string;
++	provider: string;
++	tasks: number;
++	taskTurns: number;
++	taskInput: number;
++	taskOutput: number;
++	delegatedCost: number;
++	total: number;
++}
++
++export function summarizeCost(branch: readonly unknown[]): CostSummary | undefined {
++	const entries = readEntries(branch);
++	if (entries.length === 0) return undefined;
++	const sum = entries.reduce(
++		(acc, entry) => ({
++			input: acc.input + entry.input,
++			output: acc.output + entry.output,
++			cacheRead: acc.cacheRead + entry.cacheRead,
++			cacheWrite: acc.cacheWrite + entry.cacheWrite,
++			cost: acc.cost + entry.cost,
++		}),
++		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
++	);
++	const promptTotal = sum.input + sum.cacheRead + sum.cacheWrite;
++	const last = entries[entries.length - 1]!;
++
++	const delegated = readTaskEntries(branch);
++	const tasks = delegated.reduce<{ tasks: number; turns: number; cost: number; input: number; output: number }>(
++		(acc, entry) => ({
++			tasks: acc.tasks + 1,
++			turns: acc.turns + (entry.turns ?? 0),
++			cost: acc.cost + (entry.usage?.cost ?? 0),
++			input: acc.input + (entry.usage?.input ?? 0),
++			output: acc.output + (entry.usage?.output ?? 0),
++		}),
++		{ tasks: 0, turns: 0, cost: 0, input: 0, output: 0 },
++	);
++
++	return {
++		requests: entries.length,
++		...sum,
++		reusePercent: promptTotal === 0 ? 0 : (sum.cacheRead / promptTotal) * 100,
++		declaredTools: last.declaredTools,
++		promptTokens: last.promptTokens,
++		model: last.model,
++		provider: last.provider,
++		tasks: tasks.tasks,
++		taskTurns: tasks.turns,
++		taskInput: tasks.input,
++		taskOutput: tasks.output,
++		delegatedCost: tasks.cost,
++		total: sum.cost + tasks.cost,
++	};
++}
++
++export function formatCost(summary: CostSummary): string {
++	const lines = [
++		`Requests:      ${summary.requests}`,
++		`Input:         ${formatCount(summary.input)}`,
++		`Output:        ${formatCount(summary.output)}`,
++		`Cache read:    ${formatCount(summary.cacheRead)}`,
++		`Cache write:   ${formatCount(summary.cacheWrite)}`,
++		`Cache reuse:   ${summary.reusePercent.toFixed(1)}%`,
++		`Cost:          ${formatUsd(summary.cost)}`,
++		"",
++		`Declared tools: ${summary.declaredTools.length ? summary.declaredTools.join(", ") : "—"}`,
++		`Prompt:        ~${formatCount(summary.promptTokens)} tokens (system prompt only)`,
++		`Model:         ${summary.provider}/${summary.model}`,
++	];
++	if (summary.tasks > 0) {
++		lines.push(
++			"",
++			`Subagents:     ${summary.tasks} task(s), ${summary.taskTurns} turn(s), ${formatCount(summary.taskInput)} in / ${formatCount(summary.taskOutput)} out`,
++			`Delegated:     ${formatUsd(summary.delegatedCost)}`,
++			`Total:         ${formatUsd(summary.total)}`,
++		);
++	}
++	return lines.join("\n");
 +}
 +
 +export default createReefStatsExtension();
@@ -3669,6 +3894,1109 @@ index 0000000..f76905c
 +	}
 +	return decide(call, context, builtin);
 +}
+diff --git a/packages/coding-agent/src/extensions/tasks/child.ts b/packages/coding-agent/src/extensions/tasks/child.ts
+new file mode 100644
+index 0000000..d78ea58
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/tasks/child.ts
+@@ -0,0 +1,252 @@
++/**
++ * Running a child agent.
++ *
++ * The child is a separate `reef -p` process, not a second Agent in this one, for three reasons:
++ * its context, its tool set, and its failure mode are all separate. A child that hangs or crashes
++ * cannot take the parent with it, and killing it is killing a process.
++ *
++ * The child is asked for JSON events (`--mode json`), so the parent gets the child's final text and
++ * its exact usage — cost attribution is a measurement, not an estimate.
++ */
++
++import { spawn } from "node:child_process";
++import { join } from "node:path";
++import type { AgentDefinition } from "./definitions.ts";
++import { toolsFor } from "./definitions.ts";
++
++/** A child's final message is capped here. A subagent that needs more than this is a badly scoped task. */
++export const MAX_RETURN_TOKENS = 2000;
++const MAX_RETURN_CHARS = MAX_RETURN_TOKENS * 4;
++
++export interface TaskSpec {
++	/** One paragraph, outcome-shaped. */
++	prompt: string;
++	/** Facts the child needs, curated by the parent. */
++	context?: string;
++	constraints?: string[];
++	done_when?: string[];
++	return_format?: "summary" | "patch" | "findings" | "json";
++	/** Overrides the definition's model. */
++	model?: string;
++}
++
++export interface TaskUsage {
++	input: number;
++	output: number;
++	cacheRead: number;
++	cacheWrite: number;
++	cost: number;
++}
++
++export interface TaskResult {
++	status: "done" | "failed" | "killed";
++	/** The child's final message, capped. */
++	message: string;
++	turns: number;
++	usage: TaskUsage;
++	durationMs: number;
++	exitCode?: number;
++	/** The full event stream, for `.reef/runs/` and for debugging. */
++	events: number;
++}
++
++export interface RunChildOptions {
++	definition: AgentDefinition;
++	spec: TaskSpec;
++	cwd: string;
++	signal?: AbortSignal;
++	/** The launcher the parent was started with. */
++	launcher: { command: string; args: string[] };
++	onProgress?: (line: string) => void;
++}
++
++/**
++ * The child's system prompt: the definition body, then the contract. Short by design — the child
++ * does not get the parent's rules, tools, or context files.
++ */
++export function buildChildPrompt(definition: AgentDefinition, spec: TaskSpec): string {
++	const sections: string[] = [definition.body.trim(), "", "<delegation>"];
++	sections.push(`You are a subagent named \`${definition.name}\`. You report to one caller and cannot ask it questions.`);
++	sections.push("You receive a specification, not a conversation. Everything you need is below.");
++	sections.push(`Return exactly one message.${spec.return_format === "json" ? " It must be valid JSON." : ""}`);
++	sections.push(`Keep it under ${MAX_RETURN_TOKENS} tokens. No preamble, no restating the task.`);
++	sections.push("</delegation>", "", "<specification>", spec.prompt.trim());
++	if (spec.context) sections.push("", "<context>", spec.context.trim(), "</context>");
++	if (spec.constraints?.length) sections.push("", "Constraints:", ...spec.constraints.map((item) => `- ${item}`));
++	if (spec.done_when?.length) sections.push("", "Done when:", ...spec.done_when.map((item) => `- ${item}`));
++	if (spec.return_format) sections.push("", `Return format: ${spec.return_format}`);
++	sections.push("</specification>");
++	return sections.join("\n");
++}
++
++/** Cap the return without cutting a word in half. */
++export function capReturn(text: string): string {
++	const trimmed = text.trim();
++	if (trimmed.length <= MAX_RETURN_CHARS) return trimmed;
++	return `${trimmed.slice(0, MAX_RETURN_CHARS)}\n\n[truncated at ${MAX_RETURN_TOKENS} tokens]`;
++}
++
++function emptyUsage(): TaskUsage {
++	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
++}
++
++/** Pull the final assistant text and the summed usage out of the child's event stream. */
++export function summarizeEvents(lines: readonly string[]): { message: string; turns: number; usage: TaskUsage } {
++	const usage = emptyUsage();
++	let message = "";
++	let turns = 0;
++	for (const line of lines) {
++		const trimmed = line.trim();
++		if (!trimmed.startsWith("{")) continue;
++		let event: {
++			type?: string;
++			message?: { role?: string; content?: { type?: string; text?: string }[]; usage?: Partial<TaskUsage> };
++		};
++		try {
++			event = JSON.parse(trimmed);
++		} catch {
++			continue;
++		}
++		if (event.type === "turn_start") turns += 1;
++		if (event.type !== "message_end" || event.message?.role !== "assistant") continue;
++		const text = (event.message.content ?? [])
++			.filter((part) => part.type === "text" && typeof part.text === "string")
++			.map((part) => part.text)
++			.join("");
++		if (text.trim()) message = text;
++		const reported = event.message.usage as Record<string, unknown> | undefined;
++		if (reported) {
++			const num = (key: string): number => {
++				const value = reported[key];
++				const parsed = typeof value === "number" ? value : Number(value);
++				return Number.isFinite(parsed) ? parsed : 0;
++			};
++			usage.input += num("input");
++			usage.output += num("output");
++			usage.cacheRead += num("cacheRead");
++			usage.cacheWrite += num("cacheWrite");
++			// `cost` is an object (`{input, output, cacheRead, cacheWrite, total}`), not a scalar.
++			const cost = reported.cost;
++			if (typeof cost === "number") usage.cost += Number.isFinite(cost) ? cost : 0;
++			else if (cost && typeof cost === "object") {
++				const total = (cost as Record<string, unknown>).total;
++				const parsed = typeof total === "number" ? total : Number(total);
++				if (Number.isFinite(parsed)) usage.cost += parsed;
++			}
++		}
++	}
++	return { message: capReturn(message), turns, usage };
++}
++
++/** Run a child agent to completion. */
++export async function runChild(options: RunChildOptions): Promise<TaskResult> {
++	const startedAt = Date.now();
++	const prompt = buildChildPrompt(options.definition, options.spec);
++	const tools = toolsFor(options.definition);
++	const model = options.spec.model ?? (options.definition.model === "inherit" ? undefined : options.definition.model);
++
++	const args = [
++		...options.launcher.args,
++		"-p",
++		options.spec.prompt,
++		"--mode",
++		"json",
++		"--no-session",
++		"--system-prompt",
++		prompt,
++		// The child gets its definition's tools directly: there is no parent transcript to protect.
++		"--tools",
++		tools.join(","),
++	];
++	if (model) args.push("--model", model);
++
++	const child = spawn(options.launcher.command, args, {
++		cwd: options.cwd,
++		env: { ...process.env, REEF_SUBAGENT: "1" },
++		stdio: ["ignore", "pipe", "pipe"],
++	});
++	const lines: string[] = [];
++	let stderrText = "";
++
++	const abort = () => child.kill("SIGTERM");
++	options.signal?.addEventListener("abort", abort, { once: true });
++
++	await new Promise<void>((resolve) => {
++		let buffered = "";
++		child.stdout?.on("data", (chunk: Buffer) => {
++			buffered += chunk.toString("utf8");
++			const parts = buffered.split("\n");
++			buffered = parts.pop() ?? "";
++			for (const part of parts) {
++				lines.push(part);
++				if (part.includes('"type":"turn_start"')) options.onProgress?.(`turn ${lines.length}`);
++			}
++		});
++		child.stderr?.on("data", (chunk: Buffer) => {
++			stderrText += chunk.toString("utf8");
++		});
++		child.on("error", (error) => {
++			stderrText += `\n${error.message}`;
++			resolve();
++		});
++		child.on("close", () => resolve());
++	});
++
++	options.signal?.removeEventListener("abort", abort);
++	const exitCode = child.exitCode ?? undefined;
++	const summary = summarizeEvents(lines);
++	const killed = options.signal?.aborted === true;
++	const failed = !killed && exitCode !== 0 && summary.message === "";
++
++	return {
++		status: killed ? "killed" : failed ? "failed" : "done",
++		message:
++			summary.message ||
++			(failed ? `The subagent failed (exit ${exitCode ?? "?"}): ${stderrText.trim().slice(0, 400)}` : "(no message)"),
++		turns: summary.turns,
++		usage: summary.usage,
++		durationMs: Date.now() - startedAt,
++		exitCode,
++		events: lines.length,
++	};
++}
++
++/**
++ * The family of a model id, which for every provider we have seen is the first segment:
++ * `claude-haiku-5-5` → `claude`, `deepseek-v4-pro` → `deepseek`, `gpt-6-luna` → `gpt`.
++ *
++ * Used only to give a reviewer a different family from the driver, so two models do not share the
++ * same blind spot. It is not a ranking and nothing else reads it.
++ */
++export function modelFamily(modelId: string): string {
++	return modelId.split(/[-/]/)[0]?.toLowerCase() ?? modelId;
++}
++
++export interface ModelCandidate {
++	provider: string;
++	id: string;
++}
++
++/**
++ * Pick a model from a different family than the one named. `undefined` when every available model
++ * shares the family, which is the honest answer: independence cannot be manufactured from one vendor.
++ */
++export function independentModel(driverId: string, available: readonly ModelCandidate[]): ModelCandidate | undefined {
++	const family = modelFamily(driverId);
++	const candidates = available.filter((model) => modelFamily(model.id) !== family);
++	if (candidates.length === 0) return undefined;
++	// Prefer a full model over a small or free one, then a stable id so repeated runs agree.
++	const rank = (id: string) => (/free|flash|mini|small|haiku/i.test(id) ? 1 : 0);
++	return [...candidates].sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id))[0];
++}
++
++/** Where the parent's launcher lives, so the child starts the same program. */
++export function resolveLauncher(): { command: string; args: string[] } {
++	const entry = process.argv[1];
++	return { command: process.execPath, args: entry ? [entry] : [] };
++}
++
++/** `.reef/runs/tasks/<id>.jsonl`, relative to the project. */
++export function runsPath(cwd: string, id: string): string {
++	return join(cwd, ".reef", "runs", "tasks", `${id}.jsonl`);
++}
+diff --git a/packages/coding-agent/src/extensions/tasks/definitions.ts b/packages/coding-agent/src/extensions/tasks/definitions.ts
+new file mode 100644
+index 0000000..024971b
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/tasks/definitions.ts
+@@ -0,0 +1,242 @@
++/**
++ * Subagent definitions: `.reef/agents/<name>.md` and `~/.reef/agents/<name>.md`.
++ *
++ * A definition is a prompt and a tool policy. It is not a session, not a fork, and it inherits
++ * nothing: the child gets the definition body, a short `<delegation>` section, and the task
++ * specification the parent writes. That is the whole point of delegation — the parent curates, the
++ * child works, and the parent's cache stays warm.
++ */
++
++import { readdirSync, readFileSync } from "node:fs";
++import { homedir } from "node:os";
++import { basename, join } from "node:path";
++
++/** The tool categories a definition may ask for. */
++export type ToolPolicyKind = "read-only" | "edit" | "execute" | "all";
++
++/** Tools each category grants. A definition may also name tools explicitly. */
++export const TOOL_SETS: Record<ToolPolicyKind, string[]> = {
++	"read-only": ["read", "grep", "find", "ls"],
++	edit: ["read", "grep", "find", "ls", "edit", "write"],
++	execute: ["read", "grep", "find", "ls", "edit", "write", "bash"],
++	all: ["read", "grep", "find", "ls", "edit", "write", "bash"],
++};
++
++/** Tools a child never gets, whatever the definition says. */
++export const FORBIDDEN_CHILD_TOOLS = new Set(["task", "task_output", "task_stop", "wait_for_script"]);
++
++export interface AgentDefinition {
++	name: string;
++	description: string;
++	/** `inherit`, `different` (another family than the driver), a tier, or an explicit id. */
++	model: string;
++	reasoning?: string;
++	/** A category, an explicit list, or both. */
++	tools: { kind: ToolPolicyKind; explicit: string[] };
++	/** The prompt. Everything after the frontmatter. */
++	body: string;
++	/** Where it came from, for `/agents`. */
++	source: string;
++}
++
++export interface DefinitionProblem {
++	source: string;
++	message: string;
++}
++
++const NAME_PATTERN = /^[a-z0-9][a-z0-9-_]*$/;
++
++/** Split `---` frontmatter from the body. No YAML library: the schema is flat on purpose. */
++export function splitFrontmatter(text: string): { fields: Record<string, string>; body: string } | undefined {
++	const normalized = text.replace(/\r\n/g, "\n");
++	if (!normalized.startsWith("---")) return undefined;
++	const end = normalized.indexOf("\n---", 3);
++	if (end < 0) return undefined;
++	const head = normalized.slice(3, end).trim();
++	const body = normalized.slice(normalized.indexOf("\n", end + 1) + 1).trim();
++	const fields: Record<string, string> = {};
++	for (const line of head.split("\n")) {
++		const trimmed = line.trim();
++		if (!trimmed || trimmed.startsWith("#")) continue;
++		const colon = trimmed.indexOf(":");
++		if (colon < 0) continue;
++		fields[trimmed.slice(0, colon).trim()] = trimmed.slice(colon + 1).trim();
++	}
++	return { fields, body };
++}
++
++function parseList(value: string): string[] {
++	const inner = value.trim();
++	if (inner.startsWith("[") && inner.endsWith("]")) {
++		return inner
++			.slice(1, -1)
++			.split(",")
++			.map((item) => item.trim().replace(/^["']|["']$/g, ""))
++			.filter(Boolean);
++	}
++	return inner
++		.split(",")
++		.map((item) => item.trim())
++		.filter(Boolean);
++}
++
++/** Parse and validate one definition file. Problems are returned, never thrown. */
++export function parseDefinition(text: string, source: string): { definition?: AgentDefinition; problems: DefinitionProblem[] } {
++	const problems: DefinitionProblem[] = [];
++	const split = splitFrontmatter(text);
++	if (!split) return { problems: [{ source, message: "missing `---` frontmatter block" }] };
++	const { fields, body } = split;
++
++	const name = fields.name || basename(source).replace(/\.md$/, "");
++	if (!NAME_PATTERN.test(name)) {
++		problems.push({ source, message: `name \`${name}\` must match ${NAME_PATTERN}` });
++	}
++	const description = fields.description?.trim();
++	if (!description) problems.push({ source, message: "missing `description`" });
++	if (!body) problems.push({ source, message: "the body is empty: that is the prompt" });
++
++	const known = new Set(["name", "description", "model", "reasoning", "tools", "mcp"]);
++	for (const key of Object.keys(fields)) {
++		if (!known.has(key)) problems.push({ source, message: `unknown field \`${key}\`` });
++	}
++
++	const rawTools = fields.tools?.trim() ?? "read-only";
++	const categories: ToolPolicyKind[] = ["read-only", "edit", "execute", "all"];
++	let kind: ToolPolicyKind = "read-only";
++	let explicit: string[] = [];
++	if (categories.includes(rawTools as ToolPolicyKind)) {
++		kind = rawTools as ToolPolicyKind;
++	} else {
++		explicit = parseList(rawTools);
++		kind = "read-only";
++		if (explicit.length === 0) problems.push({ source, message: `\`tools\` must be a category or a list of tool names` });
++	}
++
++	const model = fields.model?.trim() || "inherit";
++	const named = model === "inherit" || model === "different" || ["light", "medium", "heavy"].includes(model);
++	if (!named && !model.includes("/") && !model.includes("-")) {
++		problems.push({
++			source,
++			message: `\`model\` must be inherit, different, light|medium|heavy, or a model id, not \`${model}\``,
++		});
++	}
++
++	if (problems.length > 0) return { problems };
++	return {
++		definition: {
++			name,
++			description: description ?? "",
++			model,
++			reasoning: fields.reasoning?.trim() || undefined,
++			tools: { kind, explicit },
++			body,
++			source,
++		},
++		problems,
++	};
++}
++
++/** The tool names a definition grants, minus anything a child may not have. */
++export function toolsFor(definition: AgentDefinition): string[] {
++	const granted = definition.tools.explicit.length > 0 ? definition.tools.explicit : TOOL_SETS[definition.tools.kind];
++	return [...new Set(granted)].filter((name) => !FORBIDDEN_CHILD_TOOLS.has(name));
++}
++
++export interface LoadedDefinitions {
++	definitions: AgentDefinition[];
++	problems: DefinitionProblem[];
++	/** Files that were read. */
++	sources: string[];
++}
++
++function listMarkdown(dir: string): string[] {
++	try {
++		return readdirSync(dir)
++			.filter((name) => name.endsWith(".md"))
++			.map((name) => join(dir, name));
++	} catch {
++		return [];
++	}
++}
++
++/**
++ * Load personal definitions first, then project ones. A project definition with the same name
++ * replaces the personal one: the repository's rules win inside the repository.
++ */
++export function loadDefinitions(cwd: string, agentDir = join(homedir(), ".reef", "agent")): LoadedDefinitions {
++	const byName = new Map<string, AgentDefinition>();
++	const problems: DefinitionProblem[] = [];
++	const sources: string[] = [];
++
++	const read = (path: string) => {
++		try {
++			return readFileSync(path, "utf8");
++		} catch {
++			return undefined;
++		}
++	};
++
++	for (const dir of [join(agentDir, "agents"), join(cwd, ".reef", "agents")]) {
++		for (const path of listMarkdown(dir)) {
++			const text = read(path);
++			if (text === undefined) continue;
++			sources.push(path);
++			const result = parseDefinition(text, path);
++			problems.push(...result.problems);
++			if (result.definition) byName.set(result.definition.name, result.definition);
++		}
++	}
++
++	return { definitions: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)), problems, sources };
++}
++
++/** The built-in agents, used when a project defines none. */
++export const BUILTIN_AGENTS: AgentDefinition[] = [
++	{
++		name: "explorer",
++		description: "Finds where something lives and reports the shape of it, reading only",
++		model: "inherit",
++		tools: { kind: "read-only", explicit: [] },
++		source: "builtin",
++		body: `You are an explorer. You answer one question about a codebase by reading it.
++
++Rules:
++- Search before you read, and read before you conclude. Name files and lines.
++- Report what exists, not what should exist. No recommendations unless asked.
++- If the question is ambiguous, answer the most useful reading of it and say which you chose.
++- Finish in one message: findings, ordered by relevance, each with a path.`,
++	},
++	{
++		name: "reviewer",
++		description: "Reviews a diff for correctness, security, and migration risk",
++		// A reviewer that shares the driver's family shares its blind spot. Reef picks another family
++		// when one is configured, and says so when there is not.
++		model: "different",
++		tools: { kind: "read-only", explicit: [] },
++		source: "builtin",
++		body: `You are a senior reviewer. You are given a diff and the intent behind it.
++
++Report, in order, and only what you can defend:
++1. Correctness risks, with file:line
++2. Security issues (injection, authz, secrets, unsafe deserialisation)
++3. Migration and data risks
++4. Missing tests
++
++Do not propose rewrites. Do not edit files. If the diff is fine, say so in one line.`,
++	},
++	{
++		name: "scout",
++		description: "Runs commands to find out what is true on this machine: versions, failures, timings",
++		model: "inherit",
++		tools: { kind: "execute", explicit: [] },
++		source: "builtin",
++		body: `You are a scout. You answer questions about the state of this machine or this build by running
++commands, not by guessing.
++
++Rules:
++- One command at a time when the next depends on the last; batch them when it does not.
++- Quote the actual output that supports your answer, trimmed to the relevant lines.
++- Never claim a version, a count, or a timing you did not read from output.
++- Keep the final message short: the answer, then the evidence.`,
++	},
++];
+diff --git a/packages/coding-agent/src/extensions/tasks/index.ts b/packages/coding-agent/src/extensions/tasks/index.ts
+new file mode 100644
+index 0000000..bcf26d7
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/tasks/index.ts
+@@ -0,0 +1,332 @@
++/**
++ * Subagents as tools: `task`, `task_output`, `task_stop`.
++ *
++ * None of them is declared. They live in the script index like every other deferred tool, so the
++ * model reaches them with `tools.task(...)` and the request stays two declarations wide.
++ *
++ * Background tasks share the codemode job registry and the same wake mechanism: a finished task is
++ * a follow-up message, not a poll.
++ */
++
++import { Type } from "typebox";
++import type { AgentToolResult, ExtensionAPI, ExtensionFactory, ExtensionToolContext } from "../../core/extensions/types.ts";
++import { createJob, finishJob, formatDuration, getJob, listJobs, newJobId, toEntryData, SCRIPT_JOB_ENTRY_TYPE } from "../codemode/jobs.ts";
++import { type TaskResult, independentModel, modelFamily, runChild, resolveLauncher } from "./child.ts";
++import { BUILTIN_AGENTS, type AgentDefinition, loadDefinitions, toolsFor } from "./definitions.ts";
++
++/** Session entry type for a finished task, so the parent's log carries the cost. */
++export const TASK_ENTRY_TYPE = "reef-task";
++
++export interface TaskDetail {
++	taskId: string;
++	subagent: string;
++	status: TaskResult["status"] | "running";
++	usage?: TaskResult["usage"];
++	turns?: number;
++	model?: string;
++}
++
++interface TaskState {
++	definition: AgentDefinition;
++	spec: { prompt: string; context?: string; constraints?: string[]; done_when?: string[]; return_format?: string; model?: string };
++	startedAt: number;
++	usage?: TaskResult["usage"];
++	turns?: number;
++	result?: TaskResult;
++}
++
++function statusLine(detail: TaskDetail, durationMs?: number): string {
++	const parts = [`task ${detail.taskId}`, detail.subagent, detail.status];
++	if (detail.turns !== undefined) parts.push(`${detail.turns} turns`);
++	if (detail.usage) parts.push(`$${Number(detail.usage.cost ?? 0).toFixed(4)}`);
++	if (durationMs !== undefined) parts.push(formatDuration(durationMs));
++	return parts.join(" · ");
++}
++
++function registerTaskTools(pi: ExtensionAPI): void {
++	const tasks = new Map<string, TaskState>();
++
++	const definitionFor = (cwd: string, name: string): AgentDefinition | undefined => {
++		const loaded = loadDefinitions(cwd);
++		return loaded.definitions.find((entry) => entry.name === name) ?? BUILTIN_AGENTS.find((entry) => entry.name === name);
++	};
++
++	const listFor = (cwd: string): AgentDefinition[] => {
++		const loaded = loadDefinitions(cwd);
++		const byName = new Map(loaded.definitions.map((entry) => [entry.name, entry]));
++		for (const builtin of BUILTIN_AGENTS) if (!byName.has(builtin.name)) byName.set(builtin.name, builtin);
++		return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
++	};
++
++	/**
++	 * Turn a definition's `model` into something the child CLI accepts.
++	 * `inherit` starts nothing, so the child uses the configured default (the same model as the parent in
++	 * practice). `different` picks another family when one is configured, and says so in the result when
++	 * there is not.
++	 */
++	const resolveModel = (
++		requested: string | undefined,
++		definitionModel: string,
++		ctx: ExtensionToolContext,
++	): { model?: string; note?: string } => {
++		if (requested) return { model: requested };
++		if (definitionModel !== "different") {
++			return definitionModel === "inherit" ? {} : { model: definitionModel };
++		}
++		const driver = ctx.model?.id ?? "";
++		const available = ctx.modelRegistry
++			.getAvailable()
++			.filter((model) => model.provider === ctx.model?.provider)
++			.map((model) => ({ provider: model.provider, id: model.id }));
++		const chosen = independentModel(driver, available);
++		if (!chosen) {
++			return { note: `no model outside the ${modelFamily(driver)} family is configured; used the default` };
++		}
++		return { model: chosen.id, note: `independent of ${modelFamily(driver)}` };
++	};
++
++	const start = (
++		args: {
++			subagent_type?: string;
++			description?: string;
++			prompt: string;
++			context?: string;
++			constraints?: string[];
++			done_when?: string[];
++			return_format?: "summary" | "patch" | "findings" | "json";
++			model?: string;
++		},
++		ctx: ExtensionToolContext,
++		toolCallId: string,
++		onUpdate?: (text: string) => void,
++	): { id: string; promise: Promise<AgentToolResult<TaskDetail>>; state: TaskState } | { error: string } => {
++		const name = args.subagent_type ?? "explorer";
++		const definition = definitionFor(ctx.cwd, name);
++		if (!definition) {
++			const available = listFor(ctx.cwd).map((entry) => entry.name).join(", ");
++			return { error: `No subagent named \`${name}\`. Available: ${available}` };
++		}
++		const resolved = resolveModel(args.model, definition.model, ctx);
++		const id = newJobId().replace("job-", "task-");
++		const abort = new AbortController();
++		const job = createJob<TaskDetail>(id, toolCallId, abort);
++		const state: TaskState = {
++			definition,
++			spec: {
++				prompt: args.description ? `${args.prompt}\n\n(${args.description})` : args.prompt,
++				context: args.context,
++				constraints: args.constraints,
++				done_when: args.done_when,
++				return_format: args.return_format,
++				model: resolved.model,
++			},
++			startedAt: Date.now(),
++		};
++		tasks.set(id, state);
++
++		const launcher = resolveLauncher();
++		const promise = runChild({
++			definition,
++			spec: {
++				prompt: state.spec.prompt,
++				context: args.context,
++				constraints: args.constraints,
++				done_when: args.done_when,
++				return_format: args.return_format,
++				model: resolved.model,
++			},
++			cwd: ctx.cwd,
++			signal: abort.signal,
++			launcher,
++			onProgress: (line) =>
++				onUpdate?.(`${statusLine({ taskId: id, subagent: name, status: "running" }, Date.now() - state.startedAt)} · ${line}`),
++		}).then((result) => {
++			state.result = result;
++			state.usage = result.usage;
++			state.turns = result.turns;
++			finishJob(job, result.status === "done" ? "done" : result.status === "killed" ? "killed" : "failed");
++			const detail: TaskDetail = {
++				taskId: id,
++				subagent: name,
++				status: result.status,
++				usage: result.usage,
++				turns: result.turns,
++				model: resolved.model ?? definition.model,
++			};
++			pi.appendEntry(TASK_ENTRY_TYPE, {
++				...toEntryData(job),
++				subagent: name,
++				usage: result.usage,
++				turns: result.turns,
++			});
++			const header = [statusLine(detail, result.durationMs), resolved.note ? `(${resolved.note})` : ""]
++				.filter(Boolean)
++				.join(" ");
++			return {
++				content: [
++					{ type: "text" as const, text: header },
++					{ type: "text" as const, text: result.message },
++				],
++				details: detail,
++			};
++		});
++		job.promise = promise;
++		// A job nobody waits on finishes into the transcript as a follow-up.
++		if (job.status === "running" && !job.awaiting) {
++			void promise.then((result) => {
++				if (job.awaiting) return;
++				const text = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
++				pi.sendMessage(
++					{ customType: "reef-task-finished", content: text, display: true, details: result.details },
++					{ deliverAs: "followUp", triggerTurn: true },
++				);
++			});
++		}
++		return { id, promise, state };
++	};
++
++	pi.registerTool({
++		name: "task",
++		label: "Delegate to a subagent",
++		description: `Delegate a self-contained job to a subagent, either \`${BUILTIN_AGENTS.map((entry) => entry.name).join("`, `")}\` or a definition from .reef/agents.
++
++The subagent gets a specification, never this conversation: \`prompt\` is the job, \`context\` is the facts it needs. Keep \`context\` under 2k tokens and curated — it is the difference between a useful subagent and an expensive one.
++
++Foreground by default. Pass \`background: true\` to get a task id immediately and a message when it finishes.`,
++		parameters: Type.Object({
++			prompt: Type.String({ description: "The job, one paragraph, outcome-shaped" }),
++			subagent_type: Type.Optional(Type.String({ description: "Definition name, e.g. explorer, reviewer, scout" })),
++			description: Type.Optional(Type.String({ description: "Short label for the list and the status line" })),
++			context: Type.Optional(Type.String({ description: "Facts the subagent needs, under 2k tokens, curated by you" })),
++			constraints: Type.Optional(Type.Array(Type.String(), { description: "Rules the subagent must respect" })),
++			done_when: Type.Optional(Type.Array(Type.String(), { description: "Checkable conditions for success" })),
++			return_format: Type.Optional(
++				Type.Union([Type.Literal("summary"), Type.Literal("patch"), Type.Literal("findings"), Type.Literal("json")]),
++			),
++			model: Type.Optional(Type.String({ description: "Override the definition's model" })),
++			background: Type.Optional(Type.Boolean({ description: "Return a task id immediately" })),
++		}),
++		defaultActive: false,
++		execute: async (toolCallId, args, _signal, onUpdate, ctx) => {
++			const started = start(args, ctx, toolCallId, (text) =>
++				onUpdate?.({ content: [{ type: "text", text }], details: undefined as unknown as TaskDetail }),
++			);
++			if ("error" in started) {
++				return {
++					content: [{ type: "text" as const, text: started.error }],
++					isError: true,
++					details: { taskId: "", subagent: args.subagent_type ?? "", status: "failed" } as TaskDetail,
++				};
++			}
++			if (args.background) {
++				const job = getJob<TaskDetail>(started.id);
++				if (job) job.awaiting = false;
++				return {
++					content: [
++						{
++							type: "text" as const,
++							text: `${statusLine({ taskId: started.id, subagent: started.state.definition.name, status: "running" })} — you will get a message when it finishes, or call task_output.`,
++						},
++					],
++					details: { taskId: started.id, subagent: started.state.definition.name, status: "running" } as TaskDetail,
++				};
++			}
++			const job = getJob<TaskDetail>(started.id);
++			if (job) job.awaiting = true;
++			return started.promise;
++		},
++	});
++
++	pi.registerTool({
++		name: "task_output",
++		label: "Read subagent output",
++		description: "Read a subagent's result. Blocks until it finishes unless `block` is false.",
++		parameters: Type.Object({
++			task_id: Type.String({ description: "The id `task` returned" }),
++			block: Type.Optional(Type.Boolean({ description: "Wait for completion (default true)" })),
++		}),
++		defaultActive: false,
++		execute: async (_toolCallId, args) => {
++			const job = getJob<TaskDetail>(String(args.task_id));
++			if (!job) {
++				const known = listJobs().map((entry) => entry.id).join(", ") || "none";
++				return {
++					content: [{ type: "text" as const, text: `No task \`${args.task_id}\`. Known: ${known}` }],
++					isError: true,
++					details: { taskId: String(args.task_id), subagent: "", status: "failed" } as TaskDetail,
++				};
++			}
++			job.awaiting = args.block !== false;
++			return job.promise;
++		},
++	});
++
++	pi.registerTool({
++		name: "task_stop",
++		label: "Stop a subagent",
++		description: "Stop a running subagent.",
++		parameters: Type.Object({ task_id: Type.String() }),
++		defaultActive: false,
++		execute: async (_toolCallId, args) => {
++			const job = getJob<TaskDetail>(String(args.task_id));
++			if (!job) {
++				return {
++					content: [{ type: "text" as const, text: `No task \`${args.task_id}\`.` }],
++					isError: true,
++					details: { taskId: String(args.task_id), subagent: "", status: "failed" } as TaskDetail,
++				};
++			}
++			job.abort.abort();
++			return {
++				content: [{ type: "text" as const, text: `Stopping ${job.id}.` }],
++				details: { taskId: job.id, subagent: "", status: "killed" } as TaskDetail,
++			};
++		},
++	});
++
++	pi.registerCommand("agents", {
++		description: "List the subagents available here",
++		handler: async (_args: string, ctx) => {
++			const definitions = listFor(ctx.cwd);
++			const lines = definitions.map((entry) => `${entry.name.padEnd(12)} ${entry.description}`);
++			const tools = definitions.map((entry) => `${entry.name}: ${toolsFor(entry).join(", ")}`);
++			ctx.ui?.notify?.([...lines, "", ...tools].join("\n"));
++		},
++	});
++
++	pi.registerCommand("tasks", {
++		description: "List this session's subagent tasks",
++		handler: async (_args: string, ctx) => {
++			const jobs = listJobs();
++			if (jobs.length === 0) {
++				ctx.ui?.notify?.("No tasks yet.");
++				return;
++			}
++			const lines = jobs.map((job) => {
++				const state = tasks.get(job.id);
++				const duration = (job.finishedAt ?? Date.now()) - job.startedAt;
++				return `${job.id}  ${(state?.definition.name ?? "?").padEnd(10)} ${job.status.padEnd(11)} ${formatDuration(duration)}`;
++			});
++			ctx.ui?.notify?.(lines.join("\n"));
++		},
++	});
++}
++
++export function createTasksExtension(): ExtensionFactory {
++	return (pi) => {
++		// Tasks are process-local like script jobs; a resumed session has no child processes.
++		pi.on("session_start", async (event) => {
++			if (event.reason === "startup" || event.reason === "new") return undefined;
++			for (const job of listJobs()) {
++				if (job.status !== "running") continue;
++				job.status = "interrupted";
++				job.finishedAt = Date.now();
++				pi.appendEntry(SCRIPT_JOB_ENTRY_TYPE, toEntryData(job));
++			}
++			return undefined;
++		});
++		registerTaskTools(pi);
++	};
++}
++
++export default createTasksExtension();
+diff --git a/packages/coding-agent/src/extensions/tasks/tasks.test.ts b/packages/coding-agent/src/extensions/tasks/tasks.test.ts
+new file mode 100644
+index 0000000..7ee60fe
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/tasks/tasks.test.ts
+@@ -0,0 +1,253 @@
++import { describe, expect, test } from "vitest";
++import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { buildChildPrompt, capReturn, independentModel, MAX_RETURN_TOKENS, modelFamily, summarizeEvents } from "./child.ts";
++import { BUILTIN_AGENTS, FORBIDDEN_CHILD_TOOLS, loadDefinitions, parseDefinition, splitFrontmatter, toolsFor } from "./definitions.ts";
++
++const valid = `---
++name: reviewer
++description: Reviews a diff
++tools: read-only
++---
++
++You review diffs.`;
++
++describe("frontmatter", () => {
++	test("splits fields from body", () => {
++		const split = splitFrontmatter(valid);
++		expect(split?.fields.name).toBe("reviewer");
++		expect(split?.body).toBe("You review diffs.");
++	});
++
++	test("a file without frontmatter is not a definition", () => {
++		expect(splitFrontmatter("just prose")).toBeUndefined();
++	});
++
++	test("an unterminated block is not a definition", () => {
++		expect(splitFrontmatter("---\nname: x\n")).toBeUndefined();
++	});
++});
++
++describe("parseDefinition", () => {
++	test("accepts a well-formed definition", () => {
++		const { definition, problems } = parseDefinition(valid, "/x/reviewer.md");
++		expect(problems).toEqual([]);
++		expect(definition?.name).toBe("reviewer");
++		expect(definition?.tools.kind).toBe("read-only");
++	});
++
++	test("the filename is the name when `name` is missing", () => {
++		const { definition } = parseDefinition(`---\ndescription: d\n---\nbody`, "/x/scout.md");
++		expect(definition?.name).toBe("scout");
++	});
++
++	test("rejects a missing description", () => {
++		const { problems } = parseDefinition(`---\nname: a\n---\nbody`, "/x/a.md");
++		expect(problems.map((p) => p.message)).toContain("missing `description`");
++	});
++
++	test("rejects an empty body, because the body is the prompt", () => {
++		const { problems } = parseDefinition(`---\nname: a\ndescription: d\n---\n   `, "/x/a.md");
++		expect(problems.map((p) => p.message)).toContain("the body is empty: that is the prompt");
++	});
++
++	test("rejects unknown fields rather than ignoring them", () => {
++		const { problems } = parseDefinition(`---\nname: a\ndescription: d\ntoolz: bash\n---\nbody`, "/x/a.md");
++		expect(problems.map((p) => p.message)).toContain("unknown field `toolz`");
++	});
++
++	test("rejects a malformed name", () => {
++		const { problems } = parseDefinition(`---\nname: Reviewer Bot\ndescription: d\n---\nbody`, "/x/a.md");
++		expect(problems.some((p) => p.message.includes("must match"))).toBe(true);
++	});
++
++	test("accepts a category or an explicit list", () => {
++		expect(parseDefinition(`---\nname: a\ndescription: d\ntools: execute\n---\nb`, "/a.md").definition?.tools.kind).toBe("execute");
++		const explicit = parseDefinition(`---\nname: a\ndescription: d\ntools: [read, grep]\n---\nb`, "/a.md");
++		expect(explicit.definition?.tools.explicit).toEqual(["read", "grep"]);
++	});
++
++	test("rejects an empty tools list", () => {
++		const { problems } = parseDefinition(`---\nname: a\ndescription: d\ntools: []\n---\nb`, "/a.md");
++		expect(problems.some((p) => p.message.includes("must be a category or a list"))).toBe(true);
++	});
++
++	test("model must be inherit, a tier, or a model id", () => {
++		expect(parseDefinition(`---\nname: a\ndescription: d\nmodel: inherit\n---\nb`, "/a.md").definition?.model).toBe("inherit");
++		expect(parseDefinition(`---\nname: a\ndescription: d\nmodel: heavy\n---\nb`, "/a.md").definition?.model).toBe("heavy");
++		expect(parseDefinition(`---\nname: a\ndescription: d\nmodel: openai/gpt-5\n---\nb`, "/a.md").definition?.model).toBe("openai/gpt-5");
++	});
++});
++
++describe("child tool policy", () => {
++	test("a child never gets the delegation tools, whatever it asks for", () => {
++		const { definition } = parseDefinition(`---\nname: a\ndescription: d\ntools: [read, task, task_output]\n---\nb`, "/a.md");
++		const granted = toolsFor(definition!);
++		expect(granted).toEqual(["read"]);
++		for (const forbidden of FORBIDDEN_CHILD_TOOLS) expect(granted).not.toContain(forbidden);
++	});
++
++	test("the built-ins are read-only or execute, never delegating", () => {
++		for (const agent of BUILTIN_AGENTS) {
++			const granted = toolsFor(agent);
++			expect(granted).not.toContain("task");
++			expect(granted.length).toBeGreaterThan(0);
++		}
++	});
++
++	test("every built-in parses as a valid definition", () => {
++		for (const agent of BUILTIN_AGENTS) {
++			expect(agent.description.length).toBeGreaterThan(0);
++			expect(agent.body.length).toBeGreaterThan(0);
++		}
++	});
++});
++
++describe("loadDefinitions", () => {
++	test("project definitions replace personal ones of the same name", () => {
++		const home = mkdtempSync(join(tmpdir(), "reef-home-"));
++		const cwd = mkdtempSync(join(tmpdir(), "reef-proj-"));
++		mkdirSync(join(home, "agents"), { recursive: true });
++		mkdirSync(join(cwd, ".reef", "agents"), { recursive: true });
++		writeFileSync(join(home, "agents", "reviewer.md"), `---\nname: reviewer\ndescription: personal\n---\npersonal body`);
++		writeFileSync(join(cwd, ".reef", "agents", "reviewer.md"), `---\nname: reviewer\ndescription: project\n---\nproject body`);
++
++		const loaded = loadDefinitions(cwd, home);
++		expect(loaded.definitions).toHaveLength(1);
++		expect(loaded.definitions[0]?.description).toBe("project");
++		expect(loaded.definitions[0]?.body).toBe("project body");
++	});
++
++	test("a missing directory is empty, not an error", () => {
++		const cwd = mkdtempSync(join(tmpdir(), "reef-empty-"));
++		const loaded = loadDefinitions(cwd, join(cwd, "nope"));
++		expect(loaded.definitions).toEqual([]);
++		expect(loaded.problems).toEqual([]);
++	});
++
++	test("one broken definition does not hide the others", () => {
++		const cwd = mkdtempSync(join(tmpdir(), "reef-mixed-"));
++		mkdirSync(join(cwd, ".reef", "agents"), { recursive: true });
++		writeFileSync(join(cwd, ".reef", "agents", "good.md"), `---\nname: good\ndescription: d\n---\nbody`);
++		writeFileSync(join(cwd, ".reef", "agents", "bad.md"), `---\nname: bad\n---\nbody`);
++		const loaded = loadDefinitions(cwd, join(cwd, "nope"));
++		expect(loaded.definitions.map((d) => d.name)).toEqual(["good"]);
++		expect(loaded.problems).toHaveLength(1);
++	});
++});
++
++describe("child prompt", () => {
++	const explorer = BUILTIN_AGENTS[0]!;
++
++	test("carries the definition body and the specification, and no parent transcript", () => {
++		const prompt = buildChildPrompt(explorer, {
++			prompt: "Where is the session writer?",
++			context: "It is under src/core.",
++			constraints: ["Do not read test fixtures"],
++			done_when: ["A path is named"],
++		});
++		expect(prompt).toContain("You are an explorer");
++		expect(prompt).toContain("<delegation>");
++		expect(prompt).toContain("Where is the session writer?");
++		expect(prompt).toContain("<context>");
++		expect(prompt).toContain("Do not read test fixtures");
++		expect(prompt).toContain("Done when:");
++	});
++
++	test("asks for one message and caps the return", () => {
++		const prompt = buildChildPrompt(explorer, { prompt: "x" });
++		expect(prompt).toContain(`under ${MAX_RETURN_TOKENS} tokens`);
++		expect(prompt).toContain("Return exactly one message");
++	});
++
++	test("json return format is stated", () => {
++		expect(buildChildPrompt(explorer, { prompt: "x", return_format: "json" })).toContain("must be valid JSON");
++	});
++});
++
++describe("capReturn", () => {
++	test("leaves a short message alone", () => {
++		expect(capReturn("  short  ")).toBe("short");
++	});
++
++	test("truncates a long message with a marker", () => {
++		const capped = capReturn("x".repeat(MAX_RETURN_TOKENS * 4 + 10));
++		expect(capped).toContain(`[truncated at ${MAX_RETURN_TOKENS} tokens]`);
++	});
++});
++
++describe("summarizeEvents", () => {
++	const line = (event: unknown) => JSON.stringify(event);
++
++	test("takes the last assistant text and sums usage", () => {
++		const summary = summarizeEvents([
++			line({ type: "turn_start" }),
++			line({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "first" }] } }),
++			line({ type: "turn_start" }),
++			line({
++				type: "message_end",
++				message: {
++					role: "assistant",
++					content: [{ type: "text", text: "  final answer  " }],
++					usage: { input: 100, output: 20, cacheRead: 40, cacheWrite: 5, cost: { total: 0.002 } },
++				},
++			}),
++		]);
++		expect(summary.message).toBe("final answer");
++		expect(summary.turns).toBe(2);
++		expect(summary.usage).toEqual({ input: 100, output: 20, cacheRead: 40, cacheWrite: 5, cost: 0.002 });
++	});
++
++	test("ignores user messages and non-json lines", () => {
++		const summary = summarizeEvents([
++			"not json",
++			line({ type: "message_end", message: { role: "user", content: [{ type: "text", text: "hi" }] } }),
++		]);
++		expect(summary.message).toBe("");
++		expect(summary.usage.cost).toBe(0);
++	});
++
++	test("a scalar cost is accepted too", () => {
++		const summary = summarizeEvents([
++			line({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "a" }], usage: { cost: 0.5 } } }),
++		]);
++		expect(summary.usage.cost).toBe(0.5);
++	});
++
++	test("missing and malformed usage fields never produce NaN", () => {
++		const summary = summarizeEvents([
++			line({
++				type: "message_end",
++				message: { role: "assistant", content: [{ type: "text", text: "a" }], usage: { input: "nope", cost: { total: undefined } } },
++			}),
++		]);
++		expect(Number.isFinite(summary.usage.input)).toBe(true);
++		expect(Number.isFinite(summary.usage.cost)).toBe(true);
++	});
++});
++
++describe("independentFamily", () => {
++	test("the family is the first segment of the id", () => {
++		expect(modelFamily("claude-haiku-5-5")).toBe("claude");
++		expect(modelFamily("deepseek-v4.1-flash")).toBe("deepseek");
++		expect(modelFamily("gpt-6-luna")).toBe("gpt");
++	});
++
++	test("picks a different family, and prefers a full model over a small one", () => {
++		const chosen = independentModel("deepseek-v4.1-flash", [
++			{ provider: "p", id: "deepseek-v4-pro" },
++			{ provider: "p", id: "gpt-5.6-luna-flash" },
++			{ provider: "p", id: "gpt-6-luna" },
++		]);
++		expect(chosen?.id).toBe("gpt-6-luna");
++	});
++
++	test("returns nothing when every model shares the family", () => {
++		expect(independentModel("deepseek-v4.1-flash", [{ provider: "p", id: "deepseek-v4-pro" }])).toBeUndefined();
++	});
++
++	test("the reviewer asks for an independent family", () => {
++		expect(BUILTIN_AGENTS.find((a) => a.name === "reviewer")?.model).toBe("different");
++	});
++});
 diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
 index 34111cc..40e7d36 100644
 --- a/packages/coding-agent/src/main.ts
@@ -3732,6 +5060,52 @@ index 51034e0..ad3f8b9 100644
  		context.showError("Uploading bug reports requires online mode. Use Export as Zip instead.");
  		return;
  	}
+diff --git a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
+deleted file mode 100644
+index cd606a1..0000000
+--- a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
++++ /dev/null
+@@ -1,40 +0,0 @@
+-import { backgroundAnsi, foregroundAnsi, isAppleTerminalSession, rgbColor } from "@earendil-works/pi-tui";
+-import { theme } from "../theme/theme.ts";
+-
+-const CORAL = rgbColor(228, 138, 122);
+-const BLUE = rgbColor(79, 142, 179);
+-const YELLOW = rgbColor(234, 182, 93);
+-const RESET = "\x1b[0m";
+-
+-/**
+- * The pi logo: 4 cells wide and 2 lines tall. Each cell shows two square pixels with half blocks:
+- *
+- *   coral coral coral .
+- *   blue  .     coral .
+- *   blue  blue  .     yellow
+- *   blue  .     .     yellow
+- *
+- * The brand colors stay fixed across themes; they follow the terminal's color mode.
+- */
+-export function piLogoLines(): [string, string] {
+-	const mode = theme.getColorMode();
+-	const fg = (color: typeof CORAL) => foregroundAnsi(color, mode);
+-	// The fourth cell of the top line is empty, so it is padded to the same width as the bottom line.
+-	const top = `${fg(CORAL)}${backgroundAnsi(BLUE, mode)}▀${RESET}${fg(CORAL)}▀█${RESET} `;
+-	const bottom = `${fg(BLUE)}█▀${RESET} ${fg(YELLOW)}█${RESET}`;
+-	return [top, bottom];
+-}
+-
+-/**
+- * Whether the terminal renders the half-block logo correctly. Apple Terminal draws gaps between rows and
+- * misaligns the half blocks, so it gets the text wordmark instead.
+- */
+-export function supportsPiLogo(): boolean {
+-	return !isAppleTerminalSession();
+-}
+-
+-/** Text fallback for the logo: "Pi" with the logo's coral and yellow. */
+-export function piWordmark(): string {
+-	const mode = theme.getColorMode();
+-	return `${foregroundAnsi(CORAL, mode)}P${RESET}${foregroundAnsi(YELLOW, mode)}i${RESET}`;
+-}
 diff --git a/packages/coding-agent/src/modes/interactive/components/reef-logo.ts b/packages/coding-agent/src/modes/interactive/components/reef-logo.ts
 new file mode 100644
 index 0000000..7f8c48e
@@ -3778,7 +5152,7 @@ index 0000000..7f8c48e
 +	return `${fg(TEAL)}REEF${RESET}`;
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index 268a7fa..9bd5c3e 100644
+index 268a7fa..1795dfd 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 @@ -163,7 +163,7 @@ import {
@@ -3831,6 +5205,32 @@ index 268a7fa..9bd5c3e 100644
  			return;
  		}
  
+@@ -7214,6 +7214,25 @@ export class InteractiveMode {
+ 	private async handleCompactCommand(customInstructions?: string): Promise<void> {
+ 		this.clearStatusIndicator();
+ 
++		// Show what will happen first: a compaction is a declared cache break, and the size of the
++		// break is the one number that tells the user whether it is worth doing now.
++		const preview = this.session.previewCompaction();
++		if (preview) {
++			const keeps = preview.updateOfPreviousSummary
++				? "It extends the existing summary rather than writing a new one."
++				: "It writes a new anchored summary.";
++			const proceed = await this.showExtensionConfirm(
++				"Do you want to compact the session?",
++				[
++					`${formatTokens(preview.tokensBefore)} tokens now`,
++					`${preview.messagesToSummarize} messages summarized, ${preview.messagesKept} kept`,
++					`about ${formatTokens(preview.estimateAfter)} tokens afterwards`,
++					keeps,
++				].join("\n"),
++			);
++			if (!proceed) return;
++		}
++
+ 		try {
+ 			await this.session.compact(customInstructions);
+ 		} catch {
 diff --git a/packages/coding-agent/src/package-manager-cli.ts b/packages/coding-agent/src/package-manager-cli.ts
 index 93a8fd4..0cb3444 100644
 --- a/packages/coding-agent/src/package-manager-cli.ts

@@ -4,6 +4,7 @@ import llamaExtension from "./llama/index.ts";
 import mcpExtension from "./mcp/index.ts";
 import safetyExtension from "./safety/index.ts";
 import reefStatsExtension from "./reef-stats/index.ts";
+import tasksExtension from "./tasks/index.ts";
 import toolSearchExtension from "./tool-search/index.ts";
 
 export const builtInExtensions: InlineExtension[] = [
@@ -16,4 +17,5 @@ export const builtInExtensions: InlineExtension[] = [
 	// The safety floor. Not replaceable: a third-party extension must not be able to remove it.
 	{ name: "safety", factory: safetyExtension, builtin: true },
 	{ name: "reef-stats", factory: reefStatsExtension, builtin: true },
+	{ name: "tasks", factory: tasksExtension, builtin: true },
 ];

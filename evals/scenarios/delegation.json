@@ -1,0 +1,21 @@
+{
+	"suite": "delegation",
+	"note": "Does delegating to a subagent cost fewer tokens per task? Each scenario is run twice: once with an explicit delegation hint, once told to do it alone. The solo mode is the baseline.",
+	"scenarios": [
+		{
+			"id": "locate-writer",
+			"task": "Which file writes session entries to disk, and what function does the writing? Answer with the path and the function name, then stop.",
+			"hint": "Delegate this instead of reading files yourself: in a script, call `await tools.task({ subagent_type: \"explorer\", prompt: \"<the question>\", context: \"<any facts it needs>\" })` and use what it returns."
+		},
+		{
+			"id": "version-audit",
+			"task": "What version of the config schema does fixture/config.json declare, and does fixture/policy.json agree? Answer in one line.",
+			"hint": "Delegate this instead of reading files yourself: in a script, call `await tools.task({ subagent_type: \"explorer\", prompt: \"<the question>\", context: \"<any facts it needs>\" })` and use what it returns."
+		},
+		{
+			"id": "review-error",
+			"task": "Review fixture/reader.js for correctness risks and report the most serious one in one sentence.",
+			"hint": "Delegate this instead of reading files yourself: in a script, call `await tools.task({ subagent_type: \"explorer\", prompt: \"<the question>\", context: \"<any facts it needs>\" })` and use what it returns."
+		}
+	]
+}

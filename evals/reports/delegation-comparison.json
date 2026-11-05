@@ -1,0 +1,46 @@
+{
+  "runs": {
+    "solo": 3,
+    "delegate": 3,
+    "delegatedOnly": 3
+  },
+  "tokensPerTask": {
+    "solo": 14956,
+    "delegate": 12320,
+    "reductionPercent": 17.6
+  },
+  "parentTokensPerTask": {
+    "solo": 14956,
+    "delegate": 4579,
+    "reductionPercent": 69.4
+  },
+  "perScenario": [
+    {
+      "id": "locate-writer",
+      "soloTokens": 6639,
+      "delegateTokens": 8440,
+      "delegated": true,
+      "changePercent": 27.1
+    },
+    {
+      "id": "version-audit",
+      "soloTokens": 23143,
+      "delegateTokens": 9252,
+      "delegated": true,
+      "changePercent": -60
+    },
+    {
+      "id": "review-error",
+      "soloTokens": 15086,
+      "delegateTokens": 19268,
+      "delegated": true,
+      "changePercent": 27.7
+    }
+  ],
+  "killCriterion": {
+    "threshold": "10% reduction in tokens per task",
+    "result": "pass",
+    "note": "every delegate run used a subagent"
+  },
+  "generatedAt": "2026-11-05T06:46:53.371Z"
+}

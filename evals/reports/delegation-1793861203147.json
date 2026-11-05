@@ -1,0 +1,84 @@
+{
+  "suite": "delegation",
+  "runs": [
+    {
+      "id": "locate-writer",
+      "mode": "delegate",
+      "exitCode": 0,
+      "answer": "`config/session-store.js` — `writeSessionEntry` (line 5; calls `fs.appendFileSync` on line 6).",
+      "stderr": "",
+      "durationMs": 36251,
+      "requests": 2,
+      "input": 2196,
+      "output": 257,
+      "cacheRead": 1792,
+      "cost": 0.000488976,
+      "promptTokens": 613,
+      "messages": 5,
+      "delegated": {
+        "tasks": 1,
+        "turns": 5,
+        "input": 3369,
+        "output": 826,
+        "cost": 0.00102783
+      },
+      "parentTokens": 4245,
+      "delegatedTokens": 4195,
+      "totalTokens": 8440,
+      "totalCost": 0.0015168059999999999
+    },
+    {
+      "id": "version-audit",
+      "mode": "delegate",
+      "exitCode": 0,
+      "answer": "config.json declares `schemaVersion: 3`, policy.json declares `schemaVersion: 2` — they disagree (note: both files sit at the repo root, not in a `fixture/` directory; neither uses a `$schema` key).",
+      "stderr": "",
+      "durationMs": 42511,
+      "requests": 2,
+      "input": 1855,
+      "output": 396,
+      "cacheRead": 2304,
+      "cost": 0.000522762,
+      "promptTokens": 613,
+      "messages": 5,
+      "delegated": {
+        "tasks": 1,
+        "turns": 6,
+        "input": 3416,
+        "output": 1281,
+        "cost": 0.0013159439999999999
+      },
+      "parentTokens": 4555,
+      "delegatedTokens": 4697,
+      "totalTokens": 9252,
+      "totalCost": 0.0018387059999999998
+    },
+    {
+      "id": "review-error",
+      "mode": "delegate",
+      "exitCode": 0,
+      "answer": "Note: the subagent found no `fixture/` subdirectory — the file is `reader.js` at the temp dir root.",
+      "stderr": "",
+      "durationMs": 63956,
+      "requests": 2,
+      "input": 2822,
+      "output": 323,
+      "cacheRead": 1792,
+      "cost": 0.0006224760000000001,
+      "promptTokens": 613,
+      "messages": 5,
+      "delegated": {
+        "tasks": 1,
+        "turns": 7,
+        "input": 11197,
+        "output": 3134,
+        "cost": 0.0035983499999999997
+      },
+      "parentTokens": 4937,
+      "delegatedTokens": 14331,
+      "totalTokens": 19268,
+      "totalCost": 0.004220826
+    }
+  ],
+  "generatedAt": "2026-11-05T06:46:43.145Z"
+}

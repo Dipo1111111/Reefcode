@@ -18,7 +18,11 @@ export interface ScriptJobDetail {
 	fullOutputPath?: string;
 }
 
-export interface ScriptJob {
+/**
+ * One background run. Generic over the detail its tool result carries, so a subagent task can use
+ * the same registry as a script instead of growing a second one.
+ */
+export interface BackgroundJob<TDetail = ScriptJobDetail> {
 	id: string;
 	/** The tool call that started it, so a resumed session can match it. */
 	sourceToolCallId: string;
@@ -29,9 +33,11 @@ export interface ScriptJob {
 	calls: number;
 	/** Whether a caller is already waiting, so completion does not need a wake message. */
 	awaiting: boolean;
-	promise: Promise<AgentToolResult<ScriptJobDetail>>;
+	promise: Promise<AgentToolResult<TDetail>>;
 	abort: AbortController;
 }
+
+export type ScriptJob = BackgroundJob<ScriptJobDetail>;
 
 /** Session custom-entry type holding one job's start and finish. */
 export const SCRIPT_JOB_ENTRY_TYPE = "script-job";
@@ -45,7 +51,7 @@ export interface ScriptJobEntryData {
 	calls: number;
 }
 
-const jobs = new Map<string, ScriptJob>();
+const jobs = new Map<string, BackgroundJob<unknown>>();
 let counter = 0;
 
 export function newJobId(): string {
@@ -53,34 +59,34 @@ export function newJobId(): string {
 	return `job-${counter}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function createJob(id: string, sourceToolCallId: string, abort: AbortController): ScriptJob {
-	const job: ScriptJob = {
+export function createJob<TDetail>(id: string, sourceToolCallId: string, abort: AbortController): BackgroundJob<TDetail> {
+	const job: BackgroundJob<TDetail> = {
 		id,
 		sourceToolCallId,
 		startedAt: Date.now(),
 		status: "running",
 		calls: 0,
 		awaiting: false,
-		promise: Promise.resolve({ content: [], details: { calls: [] } }),
+		promise: Promise.resolve({ content: [], details: {} as TDetail }),
 		abort,
 	};
-	jobs.set(id, job);
+	jobs.set(id, job as BackgroundJob<unknown>);
 	return job;
 }
 
-export function getJob(id: string): ScriptJob | undefined {
-	return jobs.get(id);
+export function getJob<TDetail = ScriptJobDetail>(id: string): BackgroundJob<TDetail> | undefined {
+	return jobs.get(id) as BackgroundJob<TDetail> | undefined;
 }
 
-export function listJobs(): ScriptJob[] {
-	return [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
+export function listJobs(): BackgroundJob<never>[] {
+	return [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt) as BackgroundJob<never>[];
 }
 
-export function runningJobs(): ScriptJob[] {
+export function runningJobs(): BackgroundJob<never>[] {
 	return listJobs().filter((job) => job.status === "running");
 }
 
-export function finishJob(job: ScriptJob, status: ScriptJobStatus): void {
+export function finishJob(job: BackgroundJob<unknown>, status: ScriptJobStatus): void {
 	if (job.status !== "running") return;
 	job.status = status;
 	job.finishedAt = Date.now();
@@ -93,12 +99,12 @@ export function markInterrupted(): ScriptJobEntryData[] {
 		if (job.status !== "running") continue;
 		job.status = "interrupted";
 		job.finishedAt = Date.now();
-		interrupted.push(toEntryData(job));
+		interrupted.push(toEntryData(job as BackgroundJob<ScriptJobDetail>));
 	}
 	return interrupted;
 }
 
-export function toEntryData(job: ScriptJob): ScriptJobEntryData {
+export function toEntryData(job: BackgroundJob<unknown>): ScriptJobEntryData {
 	return {
 		id: job.id,
 		sourceToolCallId: job.sourceToolCallId,

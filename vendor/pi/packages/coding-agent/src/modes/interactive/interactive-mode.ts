@@ -7214,6 +7214,25 @@ export class InteractiveMode {
 	private async handleCompactCommand(customInstructions?: string): Promise<void> {
 		this.clearStatusIndicator();
 
+		// Show what will happen first: a compaction is a declared cache break, and the size of the
+		// break is the one number that tells the user whether it is worth doing now.
+		const preview = this.session.previewCompaction();
+		if (preview) {
+			const keeps = preview.updateOfPreviousSummary
+				? "It extends the existing summary rather than writing a new one."
+				: "It writes a new anchored summary.";
+			const proceed = await this.showExtensionConfirm(
+				"Do you want to compact the session?",
+				[
+					`${formatTokens(preview.tokensBefore)} tokens now`,
+					`${preview.messagesToSummarize} messages summarized, ${preview.messagesKept} kept`,
+					`about ${formatTokens(preview.estimateAfter)} tokens afterwards`,
+					keeps,
+				].join("\n"),
+			);
+			if (!proceed) return;
+		}
+
 		try {
 			await this.session.compact(customInstructions);
 		} catch {

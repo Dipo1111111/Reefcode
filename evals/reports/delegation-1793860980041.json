@@ -1,0 +1,84 @@
+{
+  "suite": "delegation",
+  "runs": [
+    {
+      "id": "locate-writer",
+      "mode": "solo",
+      "exitCode": 0,
+      "answer": "`config/session-store.js` — `writeSessionEntry(sessionPath, entry)`",
+      "stderr": "",
+      "durationMs": 9989,
+      "requests": 3,
+      "input": 2123,
+      "output": 164,
+      "cacheRead": 4352,
+      "cost": 0.000429906,
+      "promptTokens": 613,
+      "messages": 7,
+      "delegated": {
+        "tasks": 0,
+        "turns": 0,
+        "input": 0,
+        "output": 0,
+        "cost": 0
+      },
+      "parentTokens": 6639,
+      "delegatedTokens": 0,
+      "totalTokens": 6639,
+      "totalCost": 0.000429906
+    },
+    {
+      "id": "version-audit",
+      "mode": "solo",
+      "exitCode": 0,
+      "answer": "There is no `fixture/` directory (the files live at the repo root): `config.json` declares `schemaVersion: 3`, while `policy.json` declares `schemaVersion: 2` — so they disagree.",
+      "stderr": "",
+      "durationMs": 26634,
+      "requests": 8,
+      "input": 4625,
+      "output": 982,
+      "cacheRead": 17536,
+      "cost": 0.001335558,
+      "promptTokens": 613,
+      "messages": 17,
+      "delegated": {
+        "tasks": 0,
+        "turns": 0,
+        "input": 0,
+        "output": 0,
+        "cost": 0
+      },
+      "parentTokens": 23143,
+      "delegatedTokens": 0,
+      "totalTokens": 23143,
+      "totalCost": 0.001335558
+    },
+    {
+      "id": "review-error",
+      "mode": "solo",
+      "exitCode": 0,
+      "answer": "Tell me which file you actually meant and I'll do a full review.",
+      "stderr": "",
+      "durationMs": 22766,
+      "requests": 6,
+      "input": 5619,
+      "output": 1019,
+      "cacheRead": 8448,
+      "cost": 0.0014795939999999999,
+      "promptTokens": 613,
+      "messages": 13,
+      "delegated": {
+        "tasks": 0,
+        "turns": 0,
+        "input": 0,
+        "output": 0,
+        "cost": 0
+      },
+      "parentTokens": 15086,
+      "delegatedTokens": 0,
+      "totalTokens": 15086,
+      "totalCost": 0.0014795939999999999
+    }
+  ],
+  "generatedAt": "2026-11-05T06:43:00.039Z"
+}

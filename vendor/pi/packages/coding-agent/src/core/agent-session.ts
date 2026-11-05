@@ -83,6 +83,7 @@ import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
 import {
 	applySectionBudgets,
 	type BudgetResult,
+	type CacheBreak,
 	formatAudit,
 	type RequestAudit,
 	RequestAuditor,
@@ -507,6 +508,8 @@ export class AgentSession {
 	private readonly _requestAuditor = new RequestAuditor();
 	private _lastBudget: BudgetResult | undefined;
 	private _lastAudit: RequestAudit | undefined;
+	/** A cache break that is expected to happen on the next request, and why. */
+	private _pendingCacheBreak: CacheBreak | undefined;
 
 	/** Snapshot the request that is about to be sent, and say so when it breaks the cache contract. */
 	private _recordRequestAudit(messages: readonly AgentMessage[]): void {
@@ -516,7 +519,9 @@ export class AgentSession {
 			messages,
 			truncated: this._lastBudget?.truncated,
 			extraTokens: { schemas: Math.round(JSON.stringify(this.agent.state.tools).length / 3.6) },
+			breakReason: this._pendingCacheBreak,
 		});
+		this._pendingCacheBreak = undefined;
 		this._lastAudit = audit;
 		if (process.env.REEF_TRACE === "1") process.stderr.write(`[reef] ${formatAudit(audit)}\n`);
 		for (const violation of audit.violations) {
@@ -2928,9 +2933,44 @@ export class AgentSession {
 	 *
 	 * @param customInstructions Optional instructions for the compaction summary
 	 */
+	/**
+	 * What a compaction would do, without doing it.
+	 *
+	 * `/compact` shows these numbers before it touches the transcript, because a compaction is a
+	 * declared cache break and the user should see the size of it.
+	 */
+	previewCompaction(): {
+		tokensBefore: number;
+		messagesToSummarize: number;
+		messagesKept: number;
+		estimateSummaryTokens: number;
+		estimateAfter: number;
+		updateOfPreviousSummary: boolean;
+		fileOperations: number;
+	} | undefined {
+		const model = this.model;
+		if (!model) return undefined;
+		const settings = this.settingsManager.getCompactionSettings(model);
+		const pathEntries = this.sessionManager.getBranch();
+		const preparation = prepareCompaction(pathEntries, settings);
+		if (!preparation) return undefined;
+		const summarized = preparation.messagesToSummarize.length + preparation.turnPrefixMessages.length;
+		const estimateSummaryTokens = Math.min(settings.keepRecentTokens, Math.round(preparation.tokensBefore * 0.15));
+		return {
+			tokensBefore: preparation.tokensBefore,
+			messagesToSummarize: summarized,
+			messagesKept: this.agent.state.messages.length - summarized,
+			estimateSummaryTokens,
+			estimateAfter: estimateSummaryTokens + settings.keepRecentTokens,
+			updateOfPreviousSummary: preparation.previousSummary !== undefined,
+			fileOperations: preparation.fileOps ? Object.keys(preparation.fileOps).length : 0,
+		};
+	}
+
 	async compact(customInstructions?: string): Promise<CompactionResult> {
 		await this.abort();
 		this._compactionAbortController = new AbortController();
+		this._pendingCacheBreak = "compaction";
 		this._emit({ type: "compaction_start", reason: "manual" });
 		let fromExtension = false;
 		let cancelledByExtension = false;

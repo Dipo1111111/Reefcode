@@ -1,0 +1,84 @@
+{
+  "suite": "delegation",
+  "runs": [
+    {
+      "id": "locate-writer",
+      "mode": "delegate",
+      "exitCode": 0,
+      "answer": "**Function:** `writeSessionEntry`",
+      "stderr": "",
+      "durationMs": 23163,
+      "requests": 5,
+      "input": 3272,
+      "output": 486,
+      "cacheRead": 8704,
+      "cost": 0.000808512,
+      "promptTokens": 613,
+      "messages": 11,
+      "delegated": {
+        "tasks": 0,
+        "turns": 0,
+        "input": 0,
+        "output": 0,
+        "cost": 0
+      },
+      "parentTokens": 12462,
+      "delegatedTokens": 0,
+      "totalTokens": 12462,
+      "totalCost": 0.000808512
+    },
+    {
+      "id": "version-audit",
+      "mode": "delegate",
+      "exitCode": 0,
+      "answer": "No — `fixture/` doesn't exist (both files sit at the repo root): `config.json` declares `schemaVersion: 3`, while `policy.json` declares `2`, so they disagree.",
+      "stderr": "",
+      "durationMs": 25713,
+      "requests": 5,
+      "input": 3370,
+      "output": 566,
+      "cacheRead": 8960,
+      "cost": 0.00087198,
+      "promptTokens": 613,
+      "messages": 11,
+      "delegated": {
+        "tasks": 0,
+        "turns": 0,
+        "input": 0,
+        "output": 0,
+        "cost": 0
+      },
+      "parentTokens": 12896,
+      "delegatedTokens": 0,
+      "totalTokens": 12896,
+      "totalCost": 0.00087198
+    },
+    {
+      "id": "review-error",
+      "mode": "delegate",
+      "exitCode": 0,
+      "answer": "(Secondary, less severe: it throws on missing/undecodable files instead of surfacing a clean error, and has no size limit.)",
+      "stderr": "",
+      "durationMs": 23635,
+      "requests": 4,
+      "input": 2906,
+      "output": 768,
+      "cacheRead": 6144,
+      "cost": 0.000915132,
+      "promptTokens": 613,
+      "messages": 9,
+      "delegated": {
+        "tasks": 0,
+        "turns": 0,
+        "input": 0,
+        "output": 0,
+        "cost": 0
+      },
+      "parentTokens": 9818,
+      "delegatedTokens": 0,
+      "totalTokens": 9818,
+      "totalCost": 0.000915132
+    }
+  ],
+  "generatedAt": "2026-11-05T06:44:15.345Z"
+}

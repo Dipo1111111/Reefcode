@@ -10,6 +10,7 @@
  */
 
 import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types.ts";
+import { TASK_ENTRY_TYPE as REEF_TASK_ENTRY_TYPE } from "../tasks/index.ts";
 
 /** Session custom-entry type holding one model call's usage. */
 export const REEF_REQUEST_ENTRY_TYPE = "reef-request";
@@ -138,38 +139,8 @@ export function createReefStatsExtension(): ExtensionFactory {
 		pi.registerCommand("cost", {
 			description: "Tokens, cache reuse, and spend for this session",
 			handler: async (_args: string, ctx) => {
-				const entries = readEntries(ctx.sessionManager.getBranch?.() ?? []);
-				if (entries.length === 0) {
-					ctx.ui?.notify?.("No model calls recorded yet.");
-					return;
-				}
-				const sum = entries.reduce(
-					(acc, entry) => ({
-						input: acc.input + entry.input,
-						output: acc.output + entry.output,
-						cacheRead: acc.cacheRead + entry.cacheRead,
-						cacheWrite: acc.cacheWrite + entry.cacheWrite,
-						cost: acc.cost + entry.cost,
-					}),
-					{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
-				);
-				const promptTotal = sum.input + sum.cacheRead + sum.cacheWrite;
-				const reuse = promptTotal === 0 ? 0 : (sum.cacheRead / promptTotal) * 100;
-				const last = entries[entries.length - 1];
-				const lines = [
-					`Requests:      ${entries.length}`,
-					`Input:         ${formatCount(sum.input)}`,
-					`Output:        ${formatCount(sum.output)}`,
-					`Cache read:    ${formatCount(sum.cacheRead)}`,
-					`Cache write:   ${formatCount(sum.cacheWrite)}`,
-					`Cache reuse:   ${reuse.toFixed(1)}%`,
-					`Cost:          ${formatUsd(sum.cost)}`,
-					"",
-					`Declared tools: ${last.declaredTools.length ? last.declaredTools.join(", ") : "—"}`,
-					`Prompt:        ~${formatCount(last.promptTokens)} tokens (system prompt only)`,
-					`Model:         ${last.provider}/${last.model}`,
-				];
-				ctx.ui?.notify?.(lines.join("\n"));
+				const summary = summarizeCost(ctx.sessionManager.getBranch?.() ?? []);
+				ctx.ui?.notify?.(summary ? formatCost(summary) : "No model calls recorded yet.");
 			},
 		});
 	};
@@ -184,6 +155,113 @@ function readEntries(branch: readonly unknown[]): ReefRequestEntry[] {
 		if (data && typeof data.at === "number") entries.push(data);
 	}
 	return entries;
+}
+
+interface ReefTaskEntry {
+	turns?: number;
+	usage?: { input?: number; output?: number; cost?: number };
+}
+
+function readTaskEntries(branch: readonly unknown[]): ReefTaskEntry[] {
+	const entries: ReefTaskEntry[] = [];
+	for (const item of branch) {
+		const entry = item as { type?: string; customType?: string; data?: unknown };
+		if (entry.type !== "custom" || entry.customType !== REEF_TASK_ENTRY_TYPE) continue;
+		const data = entry.data as ReefTaskEntry | undefined;
+		if (data && typeof data === "object") entries.push(data);
+	}
+	return entries;
+}
+
+/** Everything `/cost` reports, computed from the session branch. Pure, so it can be tested. */
+export interface CostSummary {
+	requests: number;
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+	reusePercent: number;
+	declaredTools: string[];
+	promptTokens: number;
+	model: string;
+	provider: string;
+	tasks: number;
+	taskTurns: number;
+	taskInput: number;
+	taskOutput: number;
+	delegatedCost: number;
+	total: number;
+}
+
+export function summarizeCost(branch: readonly unknown[]): CostSummary | undefined {
+	const entries = readEntries(branch);
+	if (entries.length === 0) return undefined;
+	const sum = entries.reduce(
+		(acc, entry) => ({
+			input: acc.input + entry.input,
+			output: acc.output + entry.output,
+			cacheRead: acc.cacheRead + entry.cacheRead,
+			cacheWrite: acc.cacheWrite + entry.cacheWrite,
+			cost: acc.cost + entry.cost,
+		}),
+		{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+	);
+	const promptTotal = sum.input + sum.cacheRead + sum.cacheWrite;
+	const last = entries[entries.length - 1]!;
+
+	const delegated = readTaskEntries(branch);
+	const tasks = delegated.reduce<{ tasks: number; turns: number; cost: number; input: number; output: number }>(
+		(acc, entry) => ({
+			tasks: acc.tasks + 1,
+			turns: acc.turns + (entry.turns ?? 0),
+			cost: acc.cost + (entry.usage?.cost ?? 0),
+			input: acc.input + (entry.usage?.input ?? 0),
+			output: acc.output + (entry.usage?.output ?? 0),
+		}),
+		{ tasks: 0, turns: 0, cost: 0, input: 0, output: 0 },
+	);
+
+	return {
+		requests: entries.length,
+		...sum,
+		reusePercent: promptTotal === 0 ? 0 : (sum.cacheRead / promptTotal) * 100,
+		declaredTools: last.declaredTools,
+		promptTokens: last.promptTokens,
+		model: last.model,
+		provider: last.provider,
+		tasks: tasks.tasks,
+		taskTurns: tasks.turns,
+		taskInput: tasks.input,
+		taskOutput: tasks.output,
+		delegatedCost: tasks.cost,
+		total: sum.cost + tasks.cost,
+	};
+}
+
+export function formatCost(summary: CostSummary): string {
+	const lines = [
+		`Requests:      ${summary.requests}`,
+		`Input:         ${formatCount(summary.input)}`,
+		`Output:        ${formatCount(summary.output)}`,
+		`Cache read:    ${formatCount(summary.cacheRead)}`,
+		`Cache write:   ${formatCount(summary.cacheWrite)}`,
+		`Cache reuse:   ${summary.reusePercent.toFixed(1)}%`,
+		`Cost:          ${formatUsd(summary.cost)}`,
+		"",
+		`Declared tools: ${summary.declaredTools.length ? summary.declaredTools.join(", ") : "—"}`,
+		`Prompt:        ~${formatCount(summary.promptTokens)} tokens (system prompt only)`,
+		`Model:         ${summary.provider}/${summary.model}`,
+	];
+	if (summary.tasks > 0) {
+		lines.push(
+			"",
+			`Subagents:     ${summary.tasks} task(s), ${summary.taskTurns} turn(s), ${formatCount(summary.taskInput)} in / ${formatCount(summary.taskOutput)} out`,
+			`Delegated:     ${formatUsd(summary.delegatedCost)}`,
+			`Total:         ${formatUsd(summary.total)}`,
+		);
+	}
+	return lines.join("\n");
 }
 
 export default createReefStatsExtension();
