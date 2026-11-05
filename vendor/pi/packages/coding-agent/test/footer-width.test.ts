@@ -234,8 +234,8 @@ describe("FooterComponent width handling", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const statsLine = stripAnsi(footer.render(120)[1]);
-		// The meter is the thing a user reads; the cache rate lives in /cost and /trace.
-		expect(statsLine).toContain("▰");
+		// Percentage against its own denominator, so the number is readable without arithmetic.
+		expect(statsLine).toMatch(/\d+\.\d% \/ /);
 		expect(statsLine).not.toContain("CH");
 		expect(statsLine).not.toContain("cache");
 	});

@@ -1450,10 +1450,28 @@ index de22205..109e693 100644
   * - setup was not completed before (settings.json does not exist)
   */
 diff --git a/packages/coding-agent/src/config.ts b/packages/coding-agent/src/config.ts
-index 5a9552d..2ac0a85 100644
+index 5a9552d..8f0f0e2 100644
 --- a/packages/coding-agent/src/config.ts
 +++ b/packages/coding-agent/src/config.ts
-@@ -335,11 +335,11 @@ export function getSelfUpdateCommand(
+@@ -173,15 +173,13 @@ function getSelfUpdateCommandForMethod(
+ 			const [command = "npm", ...npmArgs] = npmCommand ?? [];
+ 			const inferred = npmCommand?.length ? undefined : getInferredNpmInstall();
+ 			const prefixArgs = [...npmArgs, ...(inferred ? ["--prefix", inferred.prefix] : [])];
+-			// pi.dev advertises releases immediately, so a configured npm age gate would
+-			// block the update. npm has no per-package age gate, so this also lets new
+-			// transitive dependency releases through. Managed installs avoid this.
++			// npm has no per-release age gate, so `--min-release-age` is not an npm flag and npm
++			// rejects it (it was never valid; it produced a warning and will fail in npm 12).
+ 			const installStep = makeSelfUpdateCommandStep(command, [
+ 				...prefixArgs,
+ 				"install",
+ 				"-g",
+ 				"--ignore-scripts",
+-				"--min-release-age=0",
+ 				target.installSpec,
+ 			]);
+ 			const uninstallStep =
+@@ -335,11 +333,11 @@ export function getSelfUpdateCommand(
  }
  
  /**
@@ -1467,7 +1485,7 @@ index 5a9552d..2ac0a85 100644
  	if (fromEnv?.length) return fromEnv;
  	return setting?.length ? setting : undefined;
  }
-@@ -417,7 +417,7 @@ export function findNodePackageDir(startDir: string): string {
+@@ -417,7 +415,7 @@ export function findNodePackageDir(startDir: string): string {
  
  export function getPackageDir(): string {
  	// Allow override via environment variable (useful for Nix/Guix where store paths tokenize poorly)
@@ -1476,7 +1494,7 @@ index 5a9552d..2ac0a85 100644
  	if (envDir) {
  		return normalizePath(envDir);
  	}
-@@ -606,7 +606,7 @@ export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
+@@ -606,7 +604,7 @@ export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
  export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
  export const VERSION: string = pkg.version || "0.0.0";
  
@@ -1485,7 +1503,7 @@ index 5a9552d..2ac0a85 100644
  export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
  export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
  
-@@ -618,7 +618,7 @@ const DEFAULT_SHARE_VIEWER_URL = "https://pi.dev/session/";
+@@ -618,7 +616,7 @@ const DEFAULT_SHARE_VIEWER_URL = "https://pi.dev/session/";
  
  /** Get the share viewer URL for a gist ID. */
  export function getShareViewerUrl(gistId: string): string {
@@ -1711,6 +1729,19 @@ index a0dda03..7eecafc 100644
  				executeTool: (callerId, name, args, options) => this._executeNestedToolCall(callerId, name, args, options),
  				getCallableTools: () => this._getCallableTools(),
  			},
+diff --git a/packages/coding-agent/src/core/bug-report.ts b/packages/coding-agent/src/core/bug-report.ts
+index efdeb5e..abcd361 100644
+--- a/packages/coding-agent/src/core/bug-report.ts
++++ b/packages/coding-agent/src/core/bug-report.ts
+@@ -279,7 +279,7 @@ export function bugReportArchiveFileName(id: string): string {
+ 	return `pi-bug-report-${id}.zip`;
+ }
+ 
+-const BUG_SUMMARY_SYSTEM_PROMPT = `You are helping a user file a bug report about pi, the coding agent they are talking to. You will be shown the conversation transcript. Write a report for the pi developers describing what the user was doing and what went wrong.
++const BUG_SUMMARY_SYSTEM_PROMPT = `You are helping a user file a bug report about REEF, the coding agent they are talking to. You will be shown the conversation transcript. Write a report describing what the user was doing and what went wrong.
+ 
+ Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the report.`;
+ 
 diff --git a/packages/coding-agent/src/core/cache-warmer.ts b/packages/coding-agent/src/core/cache-warmer.ts
 index 60e94dd..bb896b1 100644
 --- a/packages/coding-agent/src/core/cache-warmer.ts
@@ -7388,30 +7419,29 @@ index f115d2b..dc4dbdd 100644
  			this.options.onCancel();
  		}
 diff --git a/packages/coding-agent/src/modes/interactive/components/footer.ts b/packages/coding-agent/src/modes/interactive/components/footer.ts
-index 8bb7b35..439428b 100644
+index 8bb7b35..6000ec8 100644
 --- a/packages/coding-agent/src/modes/interactive/components/footer.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/footer.ts
-@@ -44,6 +44,19 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
+@@ -44,6 +44,18 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
  	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
  }
  
 +/**
-+ * A ten-cell meter plus the percentage. Colour carries the state, so the number never has to be
-+ * read as an instruction: green is comfortable, amber is worth watching, red means compact soon.
++ * `16.1% / 1.0M` — the percentage used against the window it is a percentage of. A number without
++ * its denominator cannot be read without doing arithmetic the user should not have to do.
 + */
-+export function renderContextMeter(percent: number, known: boolean, window: number): string {
-+	if (!known) return theme.fg("dim", `? of ${formatTokens(window)}`);
-+	const cells = 10;
-+	const filled = Math.max(0, Math.min(cells, Math.round((percent / 100) * cells)));
-+	const color = percent > 90 ? "error" : percent > 70 ? "warning" : "success";
-+	const meter = theme.fg(color, "▰".repeat(filled)) + theme.fg("dim", "▱".repeat(cells - filled));
-+	return `${meter} ${theme.fg(color, `${Math.round(percent)}%`)}`;
++export function formatContext(percent: number, known: boolean, window: number): string {
++	const total = formatTokens(window);
++	if (!known) return `? / ${total}`;
++	const usage = `${percent.toFixed(1)}% / ${total}`;
++	const color = percent > 90 ? "error" : percent > 70 ? "warning" : undefined;
++	return color ? theme.fg(color, usage) : usage;
 +}
 +
  interface SessionStats {
  	session: AgentSession;
  	sessionId: string;
-@@ -59,11 +72,29 @@ interface SessionStats {
+@@ -59,11 +71,35 @@ interface SessionStats {
   * Footer component that shows pwd, token stats, and context usage.
   * Computes token/context stats from session, gets git branch and extension statuses from provider.
   */
@@ -7434,6 +7464,12 @@ index 8bb7b35..439428b 100644
  	private sessionStats?: SessionStats;
 +	/** Supplied by interactive-mode from the request audit and the job registry. */
 +	private reefFacts?: ReefFooterFacts;
++	private tokenRate?: number;
++
++	/** Output tokens per second of the most recent response. */
++	setTokenRate(rate: number | undefined): void {
++		this.tokenRate = rate;
++	}
 +
 +	setReefFacts(facts: ReefFooterFacts | undefined): void {
 +		this.reefFacts = facts;
@@ -7441,7 +7477,7 @@ index 8bb7b35..439428b 100644
  
  	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
  		this.session = session;
-@@ -156,10 +187,10 @@ export class FooterComponent implements Component {
+@@ -156,10 +192,10 @@ export class FooterComponent implements Component {
  
  	render(width: number): string[] {
  		const state = this.session.state;
@@ -7454,7 +7490,7 @@ index 8bb7b35..439428b 100644
  
  		// Replace home directory with ~
  		let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
-@@ -176,49 +207,25 @@ export class FooterComponent implements Component {
+@@ -176,49 +212,31 @@ export class FooterComponent implements Component {
  			pwd = `${pwd} • ${sessionName}`;
  		}
  
@@ -7466,11 +7502,16 @@ index 8bb7b35..439428b 100644
 -		if (usageTotals.cacheWrite) statsParts.push(`W${formatTokens(usageTotals.cacheWrite)}`);
 -		if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
 -			statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
--		}
 +		// Left side: three things a user reads at a glance, in the order they think about them —
 +		// how full the window is, what this session has cost, and whether anything is running.
 +		// Token counters, cache rates and context windows live in /cost, /trace and /context.
-+		const parts: string[] = [renderContextMeter(contextPercentValue, contextKnown, contextWindow)];
++		const parts: string[] = [formatContext(contextPercentValue, contextKnown, contextWindow)];
++
++		// Throughput, when the last response measured it. Worth a slot because it is the difference
++		// between "the model is slow" and "the harness is waiting".
++		if (this.tokenRate !== undefined && this.tokenRate > 0) {
++			parts.push(theme.fg("dim", `${this.tokenRate.toFixed(0)} tok/s`));
+ 		}
  
 -		// Kimi Coding is subscription-backed despite using API-key authentication.
  		const usingSubscription = state.model
@@ -7495,26 +7536,26 @@ index 8bb7b35..439428b 100644
 -			contextPercentStr = theme.fg("warning", contextPercentDisplay);
 -		} else {
 -			contextPercentStr = contextPercentDisplay;
+-		}
+-		statsParts.push(contextPercentStr);
+-		if (areExperimentalFeaturesEnabled()) {
+-			statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
 +		if (this.reefFacts) {
 +			const { declaredTools, promptTokens, tier, jobs } = this.reefFacts;
 +			parts.push(theme.fg("dim", `${declaredTools} tools · ${formatTokens(promptTokens)} prompt · ${tier}`));
 +			if (jobs > 0) parts.push(theme.fg("dim", `${jobs} running`));
  		}
--		statsParts.push(contextPercentStr);
--		if (areExperimentalFeaturesEnabled()) {
--			statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
--		}
--
+ 
 -		let statsLeft = statsParts.join(" ");
 -
 -		// Add model name on the right side, plus thinking level if model supports it
 -		const modelName = state.model?.id || "no-model";
- 
+-
 +		let statsLeft = parts.join(theme.fg("dim", "  ·  "));
  		let statsLeftWidth = visibleWidth(statsLeft);
  
  		// If statsLeft is too wide, truncate it
-@@ -231,16 +238,17 @@ export class FooterComponent implements Component {
+@@ -231,16 +249,17 @@ export class FooterComponent implements Component {
  		const minPadding = 2;
  
  		// Add thinking level indicator if model supports reasoning
@@ -7534,7 +7575,7 @@ index 8bb7b35..439428b 100644
  			rightSideWithoutProvider += ` → ${routed.model.id}${level}`;
  		}
  
-@@ -249,7 +257,6 @@ export class FooterComponent implements Component {
+@@ -249,7 +268,6 @@ export class FooterComponent implements Component {
  		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
  			rightSide = `(${state.model!.provider}) ${rightSideWithoutProvider}`;
  			if (statsLeftWidth + minPadding + visibleWidth(rightSide) > width) {
@@ -7542,7 +7583,7 @@ index 8bb7b35..439428b 100644
  				rightSide = rightSideWithoutProvider;
  			}
  		}
-@@ -259,32 +266,22 @@ export class FooterComponent implements Component {
+@@ -259,32 +277,22 @@ export class FooterComponent implements Component {
  
  		let statsLine: string;
  		if (totalNeeded <= width) {
@@ -7626,51 +7667,79 @@ index cd606a1..0000000
 -}
 diff --git a/packages/coding-agent/src/modes/interactive/components/reef-logo.ts b/packages/coding-agent/src/modes/interactive/components/reef-logo.ts
 new file mode 100644
-index 0000000..7f8c48e
+index 0000000..90dc744
 --- /dev/null
 +++ b/packages/coding-agent/src/modes/interactive/components/reef-logo.ts
-@@ -0,0 +1,39 @@
+@@ -0,0 +1,67 @@
 +import { backgroundAnsi, foregroundAnsi, isAppleTerminalSession, rgbColor } from "@earendil-works/pi-tui";
 +import { theme } from "../theme/theme.ts";
 +
-+/** Reef teal, the single accent (docs/17 §3). */
-+const TEAL = rgbColor(94, 200, 192);
-+const DEEP = rgbColor(48, 122, 118);
-+const RESET = "\x1b[0m";
-+
 +/**
-+ * The reef mark: 4 cells wide and 2 lines tall, built from half blocks.
-+ *
-+ *   ▄▄▄▄      the surface
-+ *   █▄▄█      what is under it
++ * The mark is a five-row block wordmark: square strokes, one cell of tracking, no artwork. It reads
++ * as a name rather than a picture, which is what a startup screen needs — the input below is the
++ * thing a user is looking for.
 + *
 + * Colours are fixed across themes and follow the terminal's colour mode.
 + */
-+export function reefLogoLines(): [string, string] {
-+	const mode = theme.getColorMode();
-+	const fg = (color: typeof TEAL) => foregroundAnsi(color, mode);
-+	const bg = (color: typeof DEEP) => backgroundAnsi(color, mode);
-+	const top = `${fg(TEAL)}▄▄▄▄${RESET}`;
-+	const bottom = `${fg(DEEP)}█${RESET}${bg(TEAL)}  ${RESET}${fg(DEEP)}█${RESET}`;
-+	return [top, bottom];
++const RED_LIGHT = rgbColor(226, 74, 63);
++const RED = rgbColor(190, 42, 36);
++const RED_DEEP = rgbColor(140, 26, 24);
++const RESET = "\x1b[0m";
++
++const GLYPHS: Record<string, string[]> = {
++	R: ["████ ", "█   █", "████ ", "█  █ ", "█   █"],
++	E: ["█████", "█    ", "████ ", "█    ", "█████"],
++	F: ["█████", "█    ", "████ ", "█    ", "█    "],
++};
++
++/** One colour per letter, so the word reads left to right without a gradient dependency. */
++const LETTER_COLOURS = [RED_LIGHT, RED_LIGHT, RED, RED_DEEP];
++
++/** Five lines, roughly 23 cells wide. */
++export function reefLogoLines(): string[] {
++	// The startup header is built while the terminal is still reporting its capabilities, so the
++	// accent may not be resolved yet. Plain blocks are better than no mark at all.
++	let mode: Parameters<typeof foregroundAnsi>[1];
++	try {
++		mode = theme.getColorMode();
++	} catch {
++		return ["████  █████ █████ █████", "█   █ █     █     █    ", "████  ████  ████  ████ ", "█  █  █     █     █    ", "█   █ █████ █████ █    "];
++	}
++	const rows: string[] = [];
++	for (let row = 0; row < 5; row += 1) {
++		let line = "";
++		"REEF".split("").forEach((letter, index) => {
++			const glyph = GLYPHS[letter]?.[row] ?? "";
++			const colour = foregroundAnsi(LETTER_COLOURS[index] ?? RED, mode);
++			line += colour + glyph + RESET + " ";
++		});
++		rows.push(line.trimEnd());
++	}
++	return rows;
 +}
 +
 +/**
-+ * Whether the terminal renders the half-block mark correctly. Apple Terminal draws gaps between
-+ * rows and misaligns the half blocks, so it gets the text wordmark instead.
++ * Apple Terminal draws gaps between rows and misaligns the blocks, so it gets the text wordmark.
 + */
 +export function supportsReefLogo(): boolean {
 +	return !isAppleTerminalSession();
 +}
 +
-+/** Text fallback: REEF in the accent colour and a dimmer second half. */
++/** Text fallback: REEF in the accent colour. */
 +export function reefWordmark(): string {
-+	const mode = theme.getColorMode();
-+	const fg = (color: typeof TEAL) => foregroundAnsi(color, mode);
-+	return `${fg(TEAL)}REEF${RESET}`;
++	try {
++		return `${foregroundAnsi(RED_LIGHT, theme.getColorMode())}REEF${RESET}`;
++	} catch {
++		return "REEF";
++	}
++}
++
++/** Kept for the 3D easter egg's anchor cell. */
++export function reefLogoBackground(): string {
++	return backgroundAnsi(RED_DEEP, theme.getColorMode());
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index 268a7fa..8ed1519 100644
+index 268a7fa..f4ead1f 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 @@ -151,7 +151,8 @@ import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
@@ -7739,7 +7808,16 @@ index 268a7fa..8ed1519 100644
  	private footerContainer: Container;
  	private footerDataProvider: FooterDataProvider;
  	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
-@@ -1034,11 +1066,11 @@ export class InteractiveMode {
+@@ -560,6 +592,8 @@ export class InteractiveMode {
+ 	private shutdownRequested = false;
+ 
+ 	/** Reports working, blocked, done, and error states to terminals that support OSC 7501. */
++	/** When the current assistant response began streaming, for the footer's tok/s. */
++	private requestStartedAt: number | undefined;
+ 	private readonly programStatus = new ProgramStatusReporter(
+ 		() => this.ui.terminal,
+ 		() => this.sessionManager.getSessionName(),
+@@ -1034,12 +1068,15 @@ export class InteractiveMode {
  			const showDetails = this.shouldShowStartupDetails();
  			// Built on demand so the header follows theme changes. The logo's first line carries the version,
  			// its second line the first line of key hints. Terminals that cannot render the logo get a
@@ -7750,12 +7828,17 @@ index 268a7fa..8ed1519 100644
  			const withLogo = (hints: string) => {
 -				if (!showLogo) return `${piWordmark()} ${theme.fg("dim", `v${this.version}`)}\n${hints}`;
 -				const [top, bottom] = piLogoLines();
+-				return `${top} ${theme.fg("dim", `v${this.version}`)}\n${bottom} ${hints}`;
 +				if (!showLogo) return `${reefWordmark()} ${theme.fg("dim", `v${this.version}`)}\n${hints}`;
-+				const [top, bottom] = reefLogoLines();
- 				return `${top} ${theme.fg("dim", `v${this.version}`)}\n${bottom} ${hints}`;
++				const logo = reefLogoLines();
++				const last = logo.length - 1;
++				// The version rides the last logo row so the mark and the number are one block, not
++				// a mark followed by a separate line of text.
++				return [...logo.slice(0, last), `${logo[last]}  ${theme.fg("dim", `v${this.version}`)}`, "", hints].join("\n");
  			};
  
-@@ -1084,7 +1116,10 @@ export class InteractiveMode {
+ 			// Build startup instructions using keybinding hint helpers
+@@ -1084,7 +1121,10 @@ export class InteractiveMode {
  					`Press ${keyText("app.tools.expand")} to show full startup help${showDetails ? " and loaded resources" : ""}.`,
  				);
  			const onboarding = () =>
@@ -7767,7 +7850,7 @@ index 268a7fa..8ed1519 100644
  			const header = new BuiltInHeader(
  				() => `${withLogo(compactInstructions())}\n${compactOnboarding()}\n\n${onboarding()}`,
  				() => `${withLogo(expandedInstructions())}\n\n${onboarding()}`,
-@@ -1171,7 +1206,7 @@ export class InteractiveMode {
+@@ -1171,7 +1211,7 @@ export class InteractiveMode {
  	async run(): Promise<void> {
  		await this.init();
  
@@ -7776,7 +7859,7 @@ index 268a7fa..8ed1519 100644
  			const controller = new AbortController();
  			const timeout = setTimeout(() => controller.abort(), 15_000);
  			void refreshModelCatalogs(this.session.modelRuntime, controller.signal)
-@@ -1196,7 +1231,7 @@ export class InteractiveMode {
+@@ -1196,7 +1236,7 @@ export class InteractiveMode {
  			})
  			.finally(() => {
  				// On Windows, npm can overwrite the shared console title while checking
@@ -7785,7 +7868,7 @@ index 268a7fa..8ed1519 100644
  				if (process.platform === "win32" && this.isInitialized) {
  					this.updateTerminalTitle();
  				}
-@@ -1286,7 +1321,7 @@ export class InteractiveMode {
+@@ -1286,7 +1326,7 @@ export class InteractiveMode {
  	}
  
  	private async checkForPackageUpdates(): Promise<string[]> {
@@ -7794,7 +7877,7 @@ index 268a7fa..8ed1519 100644
  			return [];
  		}
  
-@@ -1344,7 +1379,7 @@ export class InteractiveMode {
+@@ -1344,7 +1384,7 @@ export class InteractiveMode {
  		}
  
  		if (extendedKeysFormat === "xterm") {
@@ -7803,7 +7886,7 @@ index 268a7fa..8ed1519 100644
  		}
  
  		return undefined;
-@@ -1426,7 +1461,7 @@ export class InteractiveMode {
+@@ -1426,7 +1466,7 @@ export class InteractiveMode {
  			if (newEntries.length > 0) {
  				this.settingsManager.setExtensionChangelogVersion(key, pkg.version);
  				const name = pkg.name || sourceInfo.source;
@@ -7812,16 +7895,37 @@ index 268a7fa..8ed1519 100644
  				const markdown = newEntries
  					.map((entry) => entry.content.replace(/^##\s+/, `## ${name} `))
  					.join("\n\n")
-@@ -1454,7 +1489,7 @@ export class InteractiveMode {
+@@ -1453,24 +1493,11 @@ export class InteractiveMode {
+ 		}
  	}
  
- 	private reportInstallTelemetry(version: string): void {
+-	private reportInstallTelemetry(version: string): void {
 -		if (process.env.PI_OFFLINE) {
-+		if (process.env.REEF_OFFLINE) {
- 			return;
- 		}
+-			return;
+-		}
+-
+-		if (!isInstallTelemetryEnabled(this.settingsManager)) {
+-			return;
+-		}
+-
+-		void fetch(`https://pi.dev/api/report-install?version=${encodeURIComponent(version)}`, {
+-			headers: {
+-				"User-Agent": getPiUserAgent(version),
+-			},
+-			signal: AbortSignal.timeout(5000),
+-		})
+-			.then(() => undefined)
+-			.catch(() => undefined);
+-	}
++	/**
++	 * REEF sends no install telemetry. The upstream counter posts a version to a third-party host on
++	 * every launch; keeping that call would make the product's "no telemetry" claim false.
++	 */
++	private reportInstallTelemetry(_version: string): void {}
  
-@@ -2179,6 +2214,7 @@ export class InteractiveMode {
+ 	private getMarkdownThemeWithSettings(): MarkdownTheme {
+ 		return {
+@@ -2179,6 +2206,7 @@ export class InteractiveMode {
  		}
  		this.footer.setSession(this.session);
  		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
@@ -7829,7 +7933,7 @@ index 268a7fa..8ed1519 100644
  		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
  		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
  		this.outputPad = this.settingsManager.getOutputPad();
-@@ -3281,7 +3317,7 @@ export class InteractiveMode {
+@@ -3281,7 +3309,7 @@ export class InteractiveMode {
  
  	private setupEditorSubmitHandler(): void {
  		this.defaultEditor.onSubmit = async (text: string) => {
@@ -7838,7 +7942,48 @@ index 268a7fa..8ed1519 100644
  			if (!text) return;
  
  			// Handle commands
-@@ -3724,6 +3760,8 @@ export class InteractiveMode {
+@@ -3471,12 +3499,17 @@ export class InteractiveMode {
+ 			// First, move any pending bash components to chat
+ 			this.flushPendingBashComponents();
+ 
++			// Empty the box as soon as the message is accepted. Leaving it filled until the run
++			// starts left the submitted text sitting in the input, and anything that redrew the
++			// editor in between showed it again.
++			this.editor.setText("");
+ 			if (this.onInputCallback) {
+ 				this.onInputCallback(text);
+ 			} else {
+ 				this.pendingUserInputs.push(text);
+ 			}
+ 			this.editor.addToHistory?.(text);
++			this.ui.requestRender();
+ 		};
+ 	}
+ 
+@@ -3581,6 +3614,7 @@ export class InteractiveMode {
+ 				break;
+ 
+ 			case "message_start":
++				if (event.message.role === "assistant") this.requestStartedAt = Date.now();
+ 				if (event.message.role === "custom") {
+ 					this.addMessageToChat(event.message);
+ 					this.ui.requestRender();
+@@ -3642,6 +3676,14 @@ export class InteractiveMode {
+ 
+ 			case "message_end":
+ 				if (event.message.role === "user") break;
++				if (event.message.role === "assistant" && this.requestStartedAt !== undefined) {
++					// Generation speed, not total latency: the clock starts when the response
++					// starts streaming, so it measures what the model produced per second.
++					const elapsed = (Date.now() - this.requestStartedAt) / 1000;
++					const produced = event.message.usage?.output ?? 0;
++					this.footer.setTokenRate(elapsed > 0.25 && produced > 0 ? produced / elapsed : undefined);
++					this.requestStartedAt = undefined;
++				}
+ 				if (this.streamingComponent && event.message.role === "assistant") {
+ 					this.streamingMessage = event.message;
+ 					let errorMessage: string | undefined;
+@@ -3724,6 +3766,8 @@ export class InteractiveMode {
  
  			case "tool_execution_end": {
  				if (event.isError) this.maybeShowInstallChangeWarning();
@@ -7847,7 +7992,7 @@ index 268a7fa..8ed1519 100644
  				const component = this.pendingTools.get(event.toolCallId);
  				if (component) {
  					component.updateResult({ ...event.result, isError: event.isError, durationMs: event.durationMs });
-@@ -3734,6 +3772,8 @@ export class InteractiveMode {
+@@ -3734,6 +3778,8 @@ export class InteractiveMode {
  			}
  
  			case "agent_end":
@@ -7856,7 +8001,16 @@ index 268a7fa..8ed1519 100644
  				if (this.settingsManager.getShowTerminalProgress()) {
  					this.ui.terminal.setProgress(false);
  				}
-@@ -4451,6 +4491,13 @@ export class InteractiveMode {
+@@ -4365,7 +4411,7 @@ export class InteractiveMode {
+ 				() =>
+ 					theme.fg(
+ 						"warning",
+-						`This project is not trusted. Project ${CONFIG_DIR_NAME} resources and packages are ignored. Use /trust to save a trust decision, then restart pi.`,
++						`This project is not trusted. Project ${CONFIG_DIR_NAME} resources and packages are ignored. Use /trust to save a trust decision, then restart ${APP_NAME}.`,
+ 					),
+ 				1,
+ 				0,
+@@ -4451,6 +4497,13 @@ export class InteractiveMode {
  		this.stop();
  		await this.runtimeHost.dispose();
  
@@ -7870,7 +8024,7 @@ index 268a7fa..8ed1519 100644
  		const resumeCommand = formatResumeCommand(this.sessionManager);
  		if (resumeCommand) {
  			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
-@@ -4768,13 +4815,8 @@ export class InteractiveMode {
+@@ -4768,13 +4821,8 @@ export class InteractiveMode {
  		const updateInstruction = () =>
  			theme.fg("muted", `New version ${release.version} is available. Run `) +
  			theme.fg("accent", `${APP_NAME} update`);
@@ -7886,7 +8040,7 @@ index 268a7fa..8ed1519 100644
  		const note = release.note?.trim();
  
  		this.chatContainer.addChild(new Spacer(1));
-@@ -4789,7 +4831,6 @@ export class InteractiveMode {
+@@ -4789,7 +4837,6 @@ export class InteractiveMode {
  			);
  			this.chatContainer.addChild(new Spacer(1));
  		}
@@ -7894,7 +8048,7 @@ index 268a7fa..8ed1519 100644
  		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
  		this.ui.requestRender();
  	}
-@@ -4898,6 +4939,34 @@ export class InteractiveMode {
+@@ -4898,6 +4945,34 @@ export class InteractiveMode {
  		this.showStatus("Queued message for after compaction");
  	}
  
@@ -7929,7 +8083,7 @@ index 268a7fa..8ed1519 100644
  	private isExtensionCommand(text: string): boolean {
  		if (!text.startsWith("/")) return false;
  
-@@ -7214,6 +7283,25 @@ export class InteractiveMode {
+@@ -7214,6 +7289,25 @@ export class InteractiveMode {
  	private async handleCompactCommand(customInstructions?: string): Promise<void> {
  		this.clearStatusIndicator();
  
@@ -7968,6 +8122,326 @@ index 6908131..1efbca8 100644
  		const response = await fetch(url, {
  			method: "POST",
  			headers: {
+diff --git a/packages/coding-agent/src/modes/interactive/theme/dark.json b/packages/coding-agent/src/modes/interactive/theme/dark.json
+index 0a82c28..676e074 100644
+--- a/packages/coding-agent/src/modes/interactive/theme/dark.json
++++ b/packages/coding-agent/src/modes/interactive/theme/dark.json
+@@ -1,78 +1,79 @@
+ {
+-	"$schema": "https://pi.dev/schemas/theme.schema.json",
+-	"name": "dark",
+-	"appearance": "dark",
+-	"vars": {
+-		"text": "okhsl(234 3% 89%)",
+-		"muted": "okhsl(229 6% 67%)",
+-		"violet": "okhsl(295 50% 67%)",
+-		"blue": "okhsl(232 54% 67%)",
+-		"green": "okhsl(159 59% 67%)",
+-		"red": "okhsl(20 72% 67%)",
+-		"yellow": "okhsl(83 88% 67%)",
+-		"blueBg": "okhsl(233 41% 24%)"
+-	},
+-	"colors": {
+-		"accent": "violet",
+-		"border": "okhsl(231 57% 65%)",
+-		"borderAccent": "okhsl(295 53% 64%)",
+-		"borderMuted": "okhsl(229 8% 53%)",
+-		"success": "green",
+-		"error": "red",
+-		"warning": "yellow",
+-		"muted": "muted",
+-		"dim": "okhsl(229 8% 56%)",
+-		"text": "text",
+-		"thinkingText": "okhsl(226 7% 65%)",
+-		"selectedBg": "blueBg",
+-		"scrollbarTrack": "okhsl(237 7% 33%)",
+-		"scrollbarThumb": "okhsl(232 7% 65%)",
+-		"searchMatchBg": "okhsl(53 51% 24%)",
+-		"searchMatchText": "muted",
+-		"userMessageBg": "blueBg",
+-		"userMessageText": "text",
+-		"customMessageBg": "okhsl(295 42% 24%)",
+-		"customMessageText": "muted",
+-		"customMessageLabel": "violet",
+-		"toolPendingBg": "okhsl(229 5% 24%)",
+-		"toolSuccessBg": "okhsl(158 46% 25%)",
+-		"toolErrorBg": "okhsl(19 54% 25%)",
+-		"toolTitle": "text",
+-		"toolOutput": "muted",
+-		"mdHeading": "yellow",
+-		"mdLink": "blue",
+-		"mdLinkUrl": "muted",
+-		"mdCode": "violet",
+-		"mdCodeBlock": "green",
+-		"mdCodeBlockBorder": "muted",
+-		"mdQuote": "muted",
+-		"mdQuoteBorder": "muted",
+-		"mdHr": "muted",
+-		"mdListBullet": "violet",
+-		"toolDiffAdded": "green",
+-		"toolDiffRemoved": "red",
+-		"toolDiffContext": "muted",
+-		"syntaxComment": "muted",
+-		"syntaxKeyword": "blue",
+-		"syntaxFunction": "yellow",
+-		"syntaxVariable": "okhsl(202 58% 67%)",
+-		"syntaxString": "okhsl(52 67% 67%)",
+-		"syntaxNumber": "green",
+-		"syntaxType": "violet",
+-		"syntaxOperator": "muted",
+-		"syntaxPunctuation": "muted",
+-		"thinkingOff": "okhsl(229 8% 49%)",
+-		"thinkingMinimal": "okhsl(232 20% 52%)",
+-		"thinkingLow": "okhsl(232 45% 54%)",
+-		"thinkingMedium": "okhsl(263 59% 56%)",
+-		"thinkingHigh": "okhsl(295 73% 59%)",
+-		"thinkingXhigh": "okhsl(337 81% 61%)",
+-		"thinkingMax": "okhsl(20 99% 63%)",
+-		"bashMode": "okhsl(159 64% 65%)"
+-	},
+-	"export": {
+-		"pageBg": "okhsl(262 14% 16%)",
+-		"cardBg": "okhsl(264 13% 19%)",
+-		"infoBg": "okhsl(53 51% 24%)"
+-	}
++  "name": "dark",
++  "appearance": "dark",
++  "vars": {
++    "text": "okhsl(234 3% 89%)",
++    "muted": "okhsl(229 6% 67%)",
++    "violet": "okhsl(295 50% 67%)",
++    "blue": "okhsl(232 54% 67%)",
++    "green": "okhsl(159 59% 67%)",
++    "red": "okhsl(20 72% 67%)",
++    "yellow": "okhsl(83 88% 67%)",
++    "blueBg": "okhsl(233 41% 24%)",
++    "reefRed": "okhsl(12 78% 60%)",
++    "reefRedDeep": "okhsl(8 70% 50%)"
++  },
++  "colors": {
++    "accent": "reefRed",
++    "border": "okhsl(231 57% 65%)",
++    "borderAccent": "reefRedDeep",
++    "borderMuted": "okhsl(229 8% 53%)",
++    "success": "green",
++    "error": "red",
++    "warning": "yellow",
++    "muted": "muted",
++    "dim": "okhsl(229 8% 56%)",
++    "text": "text",
++    "thinkingText": "okhsl(226 7% 65%)",
++    "selectedBg": "blueBg",
++    "scrollbarTrack": "okhsl(237 7% 33%)",
++    "scrollbarThumb": "okhsl(232 7% 65%)",
++    "searchMatchBg": "okhsl(53 51% 24%)",
++    "searchMatchText": "muted",
++    "userMessageBg": "blueBg",
++    "userMessageText": "text",
++    "customMessageBg": "okhsl(295 42% 24%)",
++    "customMessageText": "muted",
++    "customMessageLabel": "violet",
++    "toolPendingBg": "okhsl(229 5% 24%)",
++    "toolSuccessBg": "okhsl(158 46% 25%)",
++    "toolErrorBg": "okhsl(19 54% 25%)",
++    "toolTitle": "text",
++    "toolOutput": "muted",
++    "mdHeading": "yellow",
++    "mdLink": "blue",
++    "mdLinkUrl": "muted",
++    "mdCode": "violet",
++    "mdCodeBlock": "green",
++    "mdCodeBlockBorder": "muted",
++    "mdQuote": "muted",
++    "mdQuoteBorder": "muted",
++    "mdHr": "muted",
++    "mdListBullet": "violet",
++    "toolDiffAdded": "green",
++    "toolDiffRemoved": "red",
++    "toolDiffContext": "muted",
++    "syntaxComment": "muted",
++    "syntaxKeyword": "blue",
++    "syntaxFunction": "yellow",
++    "syntaxVariable": "okhsl(202 58% 67%)",
++    "syntaxString": "okhsl(52 67% 67%)",
++    "syntaxNumber": "green",
++    "syntaxType": "violet",
++    "syntaxOperator": "muted",
++    "syntaxPunctuation": "muted",
++    "thinkingOff": "okhsl(229 8% 49%)",
++    "thinkingMinimal": "okhsl(232 20% 52%)",
++    "thinkingLow": "okhsl(232 45% 54%)",
++    "thinkingMedium": "okhsl(263 59% 56%)",
++    "thinkingHigh": "okhsl(295 73% 59%)",
++    "thinkingXhigh": "okhsl(337 81% 61%)",
++    "thinkingMax": "okhsl(20 99% 63%)",
++    "bashMode": "okhsl(159 64% 65%)"
++  },
++  "export": {
++    "pageBg": "okhsl(262 14% 16%)",
++    "cardBg": "okhsl(264 13% 19%)",
++    "infoBg": "okhsl(53 51% 24%)"
++  }
+ }
+diff --git a/packages/coding-agent/src/modes/interactive/theme/light.json b/packages/coding-agent/src/modes/interactive/theme/light.json
+index 3d870c0..54625c9 100644
+--- a/packages/coding-agent/src/modes/interactive/theme/light.json
++++ b/packages/coding-agent/src/modes/interactive/theme/light.json
+@@ -1,78 +1,79 @@
+ {
+-	"$schema": "https://pi.dev/schemas/theme.schema.json",
+-	"name": "light",
+-	"appearance": "light",
+-	"vars": {
+-		"text": "okhsl(225 5% 27%)",
+-		"muted": "okhsl(229 8% 47%)",
+-		"violet": "okhsl(295 60% 46%)",
+-		"blue": "okhsl(231 68% 47%)",
+-		"green": "okhsl(159 75% 46%)",
+-		"red": "okhsl(20 91% 47%)",
+-		"yellow": "okhsl(83 99% 47%)",
+-		"blueBg": "okhsl(235 19% 91%)"
+-	},
+-	"colors": {
+-		"accent": "violet",
+-		"border": "okhsl(231 67% 55%)",
+-		"borderAccent": "okhsl(295 59% 55%)",
+-		"borderMuted": "okhsl(235 7% 66%)",
+-		"success": "green",
+-		"error": "red",
+-		"warning": "yellow",
+-		"muted": "muted",
+-		"dim": "okhsl(229 7% 59%)",
+-		"text": "text",
+-		"thinkingText": "okhsl(234 8% 55%)",
+-		"selectedBg": "blueBg",
+-		"scrollbarTrack": "okhsl(248 3% 90%)",
+-		"scrollbarThumb": "okhsl(226 7% 65%)",
+-		"searchMatchBg": "okhsl(56 22% 91%)",
+-		"searchMatchText": "muted",
+-		"userMessageBg": "blueBg",
+-		"userMessageText": "text",
+-		"customMessageBg": "okhsl(295 25% 91%)",
+-		"customMessageText": "muted",
+-		"customMessageLabel": "violet",
+-		"toolPendingBg": "okhsl(248 3% 91%)",
+-		"toolSuccessBg": "okhsl(156 21% 91%)",
+-		"toolErrorBg": "okhsl(24 23% 91%)",
+-		"toolTitle": "text",
+-		"toolOutput": "muted",
+-		"mdHeading": "yellow",
+-		"mdLink": "blue",
+-		"mdLinkUrl": "muted",
+-		"mdCode": "violet",
+-		"mdCodeBlock": "green",
+-		"mdCodeBlockBorder": "muted",
+-		"mdQuote": "muted",
+-		"mdQuoteBorder": "muted",
+-		"mdHr": "muted",
+-		"mdListBullet": "violet",
+-		"toolDiffAdded": "green",
+-		"toolDiffRemoved": "red",
+-		"toolDiffContext": "muted",
+-		"syntaxComment": "muted",
+-		"syntaxKeyword": "blue",
+-		"syntaxFunction": "yellow",
+-		"syntaxVariable": "okhsl(203 73% 46%)",
+-		"syntaxString": "okhsl(52 84% 46%)",
+-		"syntaxNumber": "green",
+-		"syntaxType": "violet",
+-		"syntaxOperator": "muted",
+-		"syntaxPunctuation": "muted",
+-		"thinkingOff": "okhsl(223 5% 80%)",
+-		"thinkingMinimal": "okhsl(229 14% 78%)",
+-		"thinkingLow": "okhsl(232 33% 76%)",
+-		"thinkingMedium": "okhsl(264 48% 74%)",
+-		"thinkingHigh": "okhsl(295 62% 72%)",
+-		"thinkingXhigh": "okhsl(337 74% 70%)",
+-		"thinkingMax": "okhsl(20 98% 68%)",
+-		"bashMode": "okhsl(159 74% 55%)"
+-	},
+-	"export": {
+-		"pageBg": "okhsl(17 3% 94%)",
+-		"cardBg": "okhsl(17 5% 97%)",
+-		"infoBg": "okhsl(56 22% 91%)"
+-	}
++  "name": "light",
++  "appearance": "light",
++  "vars": {
++    "text": "okhsl(225 5% 27%)",
++    "muted": "okhsl(229 8% 47%)",
++    "violet": "okhsl(295 60% 46%)",
++    "blue": "okhsl(231 68% 47%)",
++    "green": "okhsl(159 75% 46%)",
++    "red": "okhsl(20 91% 47%)",
++    "yellow": "okhsl(83 99% 47%)",
++    "blueBg": "okhsl(235 19% 91%)",
++    "reefRed": "okhsl(12 78% 60%)",
++    "reefRedDeep": "okhsl(8 70% 50%)"
++  },
++  "colors": {
++    "accent": "reefRed",
++    "border": "okhsl(231 67% 55%)",
++    "borderAccent": "reefRedDeep",
++    "borderMuted": "okhsl(235 7% 66%)",
++    "success": "green",
++    "error": "red",
++    "warning": "yellow",
++    "muted": "muted",
++    "dim": "okhsl(229 7% 59%)",
++    "text": "text",
++    "thinkingText": "okhsl(234 8% 55%)",
++    "selectedBg": "blueBg",
++    "scrollbarTrack": "okhsl(248 3% 90%)",
++    "scrollbarThumb": "okhsl(226 7% 65%)",
++    "searchMatchBg": "okhsl(56 22% 91%)",
++    "searchMatchText": "muted",
++    "userMessageBg": "blueBg",
++    "userMessageText": "text",
++    "customMessageBg": "okhsl(295 25% 91%)",
++    "customMessageText": "muted",
++    "customMessageLabel": "violet",
++    "toolPendingBg": "okhsl(248 3% 91%)",
++    "toolSuccessBg": "okhsl(156 21% 91%)",
++    "toolErrorBg": "okhsl(24 23% 91%)",
++    "toolTitle": "text",
++    "toolOutput": "muted",
++    "mdHeading": "yellow",
++    "mdLink": "blue",
++    "mdLinkUrl": "muted",
++    "mdCode": "violet",
++    "mdCodeBlock": "green",
++    "mdCodeBlockBorder": "muted",
++    "mdQuote": "muted",
++    "mdQuoteBorder": "muted",
++    "mdHr": "muted",
++    "mdListBullet": "violet",
++    "toolDiffAdded": "green",
++    "toolDiffRemoved": "red",
++    "toolDiffContext": "muted",
++    "syntaxComment": "muted",
++    "syntaxKeyword": "blue",
++    "syntaxFunction": "yellow",
++    "syntaxVariable": "okhsl(203 73% 46%)",
++    "syntaxString": "okhsl(52 84% 46%)",
++    "syntaxNumber": "green",
++    "syntaxType": "violet",
++    "syntaxOperator": "muted",
++    "syntaxPunctuation": "muted",
++    "thinkingOff": "okhsl(223 5% 80%)",
++    "thinkingMinimal": "okhsl(229 14% 78%)",
++    "thinkingLow": "okhsl(232 33% 76%)",
++    "thinkingMedium": "okhsl(264 48% 74%)",
++    "thinkingHigh": "okhsl(295 62% 72%)",
++    "thinkingXhigh": "okhsl(337 74% 70%)",
++    "thinkingMax": "okhsl(20 98% 68%)",
++    "bashMode": "okhsl(159 74% 55%)"
++  },
++  "export": {
++    "pageBg": "okhsl(17 3% 94%)",
++    "cardBg": "okhsl(17 5% 97%)",
++    "infoBg": "okhsl(56 22% 91%)"
++  }
+ }
 diff --git a/packages/coding-agent/src/modes/print-mode.ts b/packages/coding-agent/src/modes/print-mode.ts
 index 84c0f9b..ab22b4f 100644
 --- a/packages/coding-agent/src/modes/print-mode.ts
@@ -8132,7 +8606,7 @@ index 7fc7151..622e2f6 100644
  // RPC Commands (stdin)
  // ============================================================================
 diff --git a/packages/coding-agent/src/package-manager-cli.ts b/packages/coding-agent/src/package-manager-cli.ts
-index 93a8fd4..0cb3444 100644
+index 93a8fd4..640a2a9 100644
 --- a/packages/coding-agent/src/package-manager-cli.ts
 +++ b/packages/coding-agent/src/package-manager-cli.ts
 @@ -56,7 +56,7 @@ const MANAGED_INSTALL_MARKER = "managed-install.json";
@@ -8162,6 +8636,15 @@ index 93a8fd4..0cb3444 100644
  	);
  
  	const entrypoint = process.argv[1];
+@@ -702,7 +702,7 @@ async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
+ 		throw new Error(`Could not determine latest ${APP_NAME} version.`);
+ 	}
+ 
+-	const packageName = latestRelease.packageName ?? PACKAGE_NAME;
++	const packageName = PACKAGE_NAME;
+ 	const installSpec = `${packageName}@${latestRelease.version}`;
+ 	if (force || packageName !== PACKAGE_NAME || isNewerPackageVersion(latestRelease.version, VERSION)) {
+ 		return {
 @@ -773,8 +773,8 @@ async function runConfiguredSelfUpdate(argv: string[], plan: SelfUpdatePlan): Pr
  
  /** Version printed by `pi --version` as resolved from PATH, the pi the user runs next. */
@@ -8173,6 +8656,26 @@ index 93a8fd4..0cb3444 100644
  	const result = spawnProcessSync(APP_NAME, ["--version"], {
  		encoding: "utf-8",
  		stdio: ["ignore", "pipe", "pipe"],
+@@ -1209,19 +1209,6 @@ export async function handlePackageCommand(
+ 						return true;
+ 					}
+ 					console.log(chalk.green(`Updated ${APP_NAME} from ${VERSION} to ${selfUpdatePlan.version}`));
+-					// The pi.dev installer migrates global npm installs to a managed install
+-					// that pins all dependencies. It does not migrate pnpm, yarn, or bun installs.
+-					if (installMethod === "npm") {
+-						const installerCommand =
+-							process.platform === "win32"
+-								? 'powershell -c "irm https://pi.dev/install.ps1 | iex"'
+-								: "curl -fsSL https://pi.dev/install.sh | sh";
+-						console.log();
+-						console.log(chalk.yellow(`This npm installation of ${APP_NAME} does not pin its dependencies.`));
+-						console.log(chalk.yellow("Run the installer to migrate to a managed installation that does:"));
+-						console.log();
+-						console.log(`  ${chalk.bold(installerCommand)}`);
+-					}
+ 				}
+ 				return true;
+ 			}
 diff --git a/packages/coding-agent/src/rpc-entry.ts b/packages/coding-agent/src/rpc-entry.ts
 index 11059a8..03b20c6 100644
 --- a/packages/coding-agent/src/rpc-entry.ts
@@ -8252,7 +8755,7 @@ index a09a3d0..1847eab 100644
  	try {
  		const latestRelease = await getLatestPiRelease(currentVersion);
 diff --git a/packages/coding-agent/test/footer-width.test.ts b/packages/coding-agent/test/footer-width.test.ts
-index 12c074d..c38dac0 100644
+index 12c074d..7c7976e 100644
 --- a/packages/coding-agent/test/footer-width.test.ts
 +++ b/packages/coding-agent/test/footer-width.test.ts
 @@ -169,7 +169,7 @@ describe("FooterComponent width handling", () => {
@@ -8278,8 +8781,8 @@ index 12c074d..c38dac0 100644
  
  		const statsLine = stripAnsi(footer.render(120)[1]);
 -		expect(statsLine).toContain("CH25.0%");
-+		// The meter is the thing a user reads; the cache rate lives in /cost and /trace.
-+		expect(statsLine).toContain("▰");
++		// Percentage against its own denominator, so the number is readable without arithmetic.
++		expect(statsLine).toMatch(/\d+\.\d% \/ /);
 +		expect(statsLine).not.toContain("CH");
 +		expect(statsLine).not.toContain("cache");
  	});

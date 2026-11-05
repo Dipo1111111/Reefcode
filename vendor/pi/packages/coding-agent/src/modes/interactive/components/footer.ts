@@ -45,16 +45,15 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 }
 
 /**
- * A ten-cell meter plus the percentage. Colour carries the state, so the number never has to be
- * read as an instruction: green is comfortable, amber is worth watching, red means compact soon.
+ * `16.1% / 1.0M` — the percentage used against the window it is a percentage of. A number without
+ * its denominator cannot be read without doing arithmetic the user should not have to do.
  */
-export function renderContextMeter(percent: number, known: boolean, window: number): string {
-	if (!known) return theme.fg("dim", `? of ${formatTokens(window)}`);
-	const cells = 10;
-	const filled = Math.max(0, Math.min(cells, Math.round((percent / 100) * cells)));
-	const color = percent > 90 ? "error" : percent > 70 ? "warning" : "success";
-	const meter = theme.fg(color, "▰".repeat(filled)) + theme.fg("dim", "▱".repeat(cells - filled));
-	return `${meter} ${theme.fg(color, `${Math.round(percent)}%`)}`;
+export function formatContext(percent: number, known: boolean, window: number): string {
+	const total = formatTokens(window);
+	if (!known) return `? / ${total}`;
+	const usage = `${percent.toFixed(1)}% / ${total}`;
+	const color = percent > 90 ? "error" : percent > 70 ? "warning" : undefined;
+	return color ? theme.fg(color, usage) : usage;
 }
 
 interface SessionStats {
@@ -91,6 +90,12 @@ export class FooterComponent implements Component {
 	private sessionStats?: SessionStats;
 	/** Supplied by interactive-mode from the request audit and the job registry. */
 	private reefFacts?: ReefFooterFacts;
+	private tokenRate?: number;
+
+	/** Output tokens per second of the most recent response. */
+	setTokenRate(rate: number | undefined): void {
+		this.tokenRate = rate;
+	}
 
 	setReefFacts(facts: ReefFooterFacts | undefined): void {
 		this.reefFacts = facts;
@@ -210,7 +215,13 @@ export class FooterComponent implements Component {
 		// Left side: three things a user reads at a glance, in the order they think about them —
 		// how full the window is, what this session has cost, and whether anything is running.
 		// Token counters, cache rates and context windows live in /cost, /trace and /context.
-		const parts: string[] = [renderContextMeter(contextPercentValue, contextKnown, contextWindow)];
+		const parts: string[] = [formatContext(contextPercentValue, contextKnown, contextWindow)];
+
+		// Throughput, when the last response measured it. Worth a slot because it is the difference
+		// between "the model is slow" and "the harness is waiting".
+		if (this.tokenRate !== undefined && this.tokenRate > 0) {
+			parts.push(theme.fg("dim", `${this.tokenRate.toFixed(0)} tok/s`));
+		}
 
 		const usingSubscription = state.model
 			? state.model.provider === "kimi-coding" || this.session.modelRuntime.isUsingSubscription(state.model.provider)

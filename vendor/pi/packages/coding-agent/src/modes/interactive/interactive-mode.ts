@@ -592,6 +592,8 @@ export class InteractiveMode {
 	private shutdownRequested = false;
 
 	/** Reports working, blocked, done, and error states to terminals that support OSC 7501. */
+	/** When the current assistant response began streaming, for the footer's tok/s. */
+	private requestStartedAt: number | undefined;
 	private readonly programStatus = new ProgramStatusReporter(
 		() => this.ui.terminal,
 		() => this.sessionManager.getSessionName(),
@@ -1070,8 +1072,11 @@ export class InteractiveMode {
 			const showLogo = supportsReefLogo();
 			const withLogo = (hints: string) => {
 				if (!showLogo) return `${reefWordmark()} ${theme.fg("dim", `v${this.version}`)}\n${hints}`;
-				const [top, bottom] = reefLogoLines();
-				return `${top} ${theme.fg("dim", `v${this.version}`)}\n${bottom} ${hints}`;
+				const logo = reefLogoLines();
+				const last = logo.length - 1;
+				// The version rides the last logo row so the mark and the number are one block, not
+				// a mark followed by a separate line of text.
+				return [...logo.slice(0, last), `${logo[last]}  ${theme.fg("dim", `v${this.version}`)}`, "", hints].join("\n");
 			};
 
 			// Build startup instructions using keybinding hint helpers
@@ -1488,24 +1493,11 @@ export class InteractiveMode {
 		}
 	}
 
-	private reportInstallTelemetry(version: string): void {
-		if (process.env.REEF_OFFLINE) {
-			return;
-		}
-
-		if (!isInstallTelemetryEnabled(this.settingsManager)) {
-			return;
-		}
-
-		void fetch(`https://pi.dev/api/report-install?version=${encodeURIComponent(version)}`, {
-			headers: {
-				"User-Agent": getPiUserAgent(version),
-			},
-			signal: AbortSignal.timeout(5000),
-		})
-			.then(() => undefined)
-			.catch(() => undefined);
-	}
+	/**
+	 * REEF sends no install telemetry. The upstream counter posts a version to a third-party host on
+	 * every launch; keeping that call would make the product's "no telemetry" claim false.
+	 */
+	private reportInstallTelemetry(_version: string): void {}
 
 	private getMarkdownThemeWithSettings(): MarkdownTheme {
 		return {
@@ -3507,12 +3499,17 @@ export class InteractiveMode {
 			// First, move any pending bash components to chat
 			this.flushPendingBashComponents();
 
+			// Empty the box as soon as the message is accepted. Leaving it filled until the run
+			// starts left the submitted text sitting in the input, and anything that redrew the
+			// editor in between showed it again.
+			this.editor.setText("");
 			if (this.onInputCallback) {
 				this.onInputCallback(text);
 			} else {
 				this.pendingUserInputs.push(text);
 			}
 			this.editor.addToHistory?.(text);
+			this.ui.requestRender();
 		};
 	}
 
@@ -3617,6 +3614,7 @@ export class InteractiveMode {
 				break;
 
 			case "message_start":
+				if (event.message.role === "assistant") this.requestStartedAt = Date.now();
 				if (event.message.role === "custom") {
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
@@ -3678,6 +3676,14 @@ export class InteractiveMode {
 
 			case "message_end":
 				if (event.message.role === "user") break;
+				if (event.message.role === "assistant" && this.requestStartedAt !== undefined) {
+					// Generation speed, not total latency: the clock starts when the response
+					// starts streaming, so it measures what the model produced per second.
+					const elapsed = (Date.now() - this.requestStartedAt) / 1000;
+					const produced = event.message.usage?.output ?? 0;
+					this.footer.setTokenRate(elapsed > 0.25 && produced > 0 ? produced / elapsed : undefined);
+					this.requestStartedAt = undefined;
+				}
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					let errorMessage: string | undefined;
@@ -4405,7 +4411,7 @@ export class InteractiveMode {
 				() =>
 					theme.fg(
 						"warning",
-						`This project is not trusted. Project ${CONFIG_DIR_NAME} resources and packages are ignored. Use /trust to save a trust decision, then restart pi.`,
+						`This project is not trusted. Project ${CONFIG_DIR_NAME} resources and packages are ignored. Use /trust to save a trust decision, then restart ${APP_NAME}.`,
 					),
 				1,
 				0,

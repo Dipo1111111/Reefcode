@@ -173,15 +173,13 @@ function getSelfUpdateCommandForMethod(
 			const [command = "npm", ...npmArgs] = npmCommand ?? [];
 			const inferred = npmCommand?.length ? undefined : getInferredNpmInstall();
 			const prefixArgs = [...npmArgs, ...(inferred ? ["--prefix", inferred.prefix] : [])];
-			// pi.dev advertises releases immediately, so a configured npm age gate would
-			// block the update. npm has no per-package age gate, so this also lets new
-			// transitive dependency releases through. Managed installs avoid this.
+			// npm has no per-release age gate, so `--min-release-age` is not an npm flag and npm
+			// rejects it (it was never valid; it produced a warning and will fail in npm 12).
 			const installStep = makeSelfUpdateCommandStep(command, [
 				...prefixArgs,
 				"install",
 				"-g",
 				"--ignore-scripts",
-				"--min-release-age=0",
 				target.installSpec,
 			]);
 			const uninstallStep =
