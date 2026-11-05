@@ -96,3 +96,57 @@ describe("CombinedAutocompleteProvider slash-command filter", () => {
 		assert.ok(items.includes("skill:brainstorm"));
 	});
 });
+
+describe("skill tags written mid-message", () => {
+	const commands = [
+		{ name: "skill:impeccable", description: "Design and polish a frontend" },
+		{ name: "skill:humanizer", description: "Remove AI tells from prose" },
+		{ name: "model", description: "Select the active model" },
+	];
+
+	async function suggestionsFor(line: string) {
+		const provider = new CombinedAutocompleteProvider(commands, process.cwd());
+		const result = await provider.getSuggestions([line], 0, line.length, {
+			signal: new AbortController().signal,
+		});
+		assert.ok(result, `expected suggestions at the end of ${JSON.stringify(line)}`);
+		return { result, provider };
+	}
+
+	it("offers skills after a '/' inside a sentence", async () => {
+		const { result } = await suggestionsFor("please tighten the hero /imp");
+		assert.deepStrictEqual(
+			result.items.map((item) => item.label),
+			["impeccable"],
+		);
+		assert.equal(result.prefix, "/imp");
+	});
+
+	it("never offers ordinary commands mid-sentence", async () => {
+		const provider = new CombinedAutocompleteProvider(commands, process.cwd());
+		const line = "please tighten the hero /mod";
+		const result = await provider.getSuggestions([line], 0, line.length, {
+			signal: new AbortController().signal,
+		});
+		assert.equal(result, null);
+	});
+
+	it("replaces only the token and leaves the sentence intact", async () => {
+		const line = "tighten the hero /imp then stop";
+		const col = line.indexOf(" then");
+		const provider = new CombinedAutocompleteProvider(commands, process.cwd());
+		const result = await provider.getSuggestions([line], 0, col, { signal: new AbortController().signal });
+		assert.ok(result);
+		const applied = provider.applyCompletion([line], 0, col, result.items[0]!, result.prefix);
+		assert.equal(applied.lines[0], "tighten the hero skill:impeccable then stop");
+	});
+
+	it("ignores a '/' that is not at a token boundary", async () => {
+		const provider = new CombinedAutocompleteProvider(commands, process.cwd());
+		const line = "open src/impeccable";
+		const result = await provider.getSuggestions([line], 0, line.length, {
+			signal: new AbortController().signal,
+		});
+		assert.equal(result, null);
+	});
+});

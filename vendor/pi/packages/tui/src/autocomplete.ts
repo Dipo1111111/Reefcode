@@ -332,6 +332,37 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 			};
 		}
 
+		// A "/" typed mid-message tags a skill instead of invoking a command. Only skills are
+		// offered, only at a token boundary, and the accepted token stays in the sentence.
+		const mention = !options.force && !textBeforeCursor.trimStart().startsWith("/")
+			? /(?:^|[\s([{<`])(\/[^\s]*)$/.exec(textBeforeCursor)
+			: null;
+		if (mention) {
+			const token = mention[1] ?? "";
+			const query = token.slice(1);
+			const skills = this.commands
+				.map((cmd) => ({
+					name: "name" in cmd ? cmd.name : cmd.value,
+					description: cmd.description ?? "",
+				}))
+				.filter((cmd) => cmd.name.startsWith("skill:"));
+			const items = skills.map((skill) => ({
+				name: skill.name,
+				label: skill.name.slice("skill:".length),
+				description: skill.description,
+			}));
+			const matches = fuzzyFilter(items, query, (item) => item.label);
+			if (matches.length === 0) return null;
+			return {
+				items: matches.map((item) => ({
+					value: item.name,
+					label: item.label,
+					...(item.description && { description: item.description }),
+				})),
+				prefix: token,
+			};
+		}
+
 		const commandText = textBeforeCursor.trimStart();
 		if (!options.force && commandText.startsWith("/")) {
 			const spaceIndex = commandText.indexOf(" ");

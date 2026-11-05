@@ -17,7 +17,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { newestSession, readEntries, summarize } from "./lib/session.mjs";
+import { finalAssistantText, newestSession, readEntries, summarize } from "./lib/session.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const reef = join(here, "..", "apps", "reef", "bin", "reef");
@@ -102,7 +102,10 @@ function runOne(scenario, options) {
 			const summary = session
 				? summarize(readEntries(session))
 				: { parentTokens: 0, delegatedTokens: 0, totalTokens: 0, totalCost: 0, requests: 0, delegated: { tasks: 0 } };
-			const answer = stdout.trim();
+			const entries = session ? readEntries(session) : [];
+			// Grade what the user saw. Raw stdout also carries tool output, so reading a file that
+			// holds a secret made the "must not repeat it" check fail even when it was not repeated.
+			const answer = (entries.length > 0 ? finalAssistantText(entries) : "") || stdout.trim();
 			const failure = grade(scenario, answer, work);
 			rmSync(work, { recursive: true, force: true });
 			resolve({
@@ -110,7 +113,7 @@ function runOne(scenario, options) {
 				pass: failure === undefined,
 				failure,
 				exitCode,
-				answer: answer.split("\n").filter(Boolean).slice(-1)[0] ?? "",
+				answer: answer.split("\n").filter(Boolean).slice(-3).join(" ").slice(0, 400),
 				stderr: stderr.trim().slice(0, 300),
 				durationMs: Date.now() - startedAt,
 				...summary,

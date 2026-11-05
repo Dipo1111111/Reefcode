@@ -7223,10 +7223,30 @@ index f115d2b..dc4dbdd 100644
  			this.options.onCancel();
  		}
 diff --git a/packages/coding-agent/src/modes/interactive/components/footer.ts b/packages/coding-agent/src/modes/interactive/components/footer.ts
-index 8bb7b35..93a63b6 100644
+index 8bb7b35..439428b 100644
 --- a/packages/coding-agent/src/modes/interactive/components/footer.ts
 +++ b/packages/coding-agent/src/modes/interactive/components/footer.ts
-@@ -59,11 +59,29 @@ interface SessionStats {
+@@ -44,6 +44,19 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
+ 	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
+ }
+ 
++/**
++ * A ten-cell meter plus the percentage. Colour carries the state, so the number never has to be
++ * read as an instruction: green is comfortable, amber is worth watching, red means compact soon.
++ */
++export function renderContextMeter(percent: number, known: boolean, window: number): string {
++	if (!known) return theme.fg("dim", `? of ${formatTokens(window)}`);
++	const cells = 10;
++	const filled = Math.max(0, Math.min(cells, Math.round((percent / 100) * cells)));
++	const color = percent > 90 ? "error" : percent > 70 ? "warning" : "success";
++	const meter = theme.fg(color, "▰".repeat(filled)) + theme.fg("dim", "▱".repeat(cells - filled));
++	return `${meter} ${theme.fg(color, `${Math.round(percent)}%`)}`;
++}
++
+ interface SessionStats {
+ 	session: AgentSession;
+ 	sessionId: string;
+@@ -59,11 +72,29 @@ interface SessionStats {
   * Footer component that shows pwd, token stats, and context usage.
   * Computes token/context stats from session, gets git branch and extension statuses from provider.
   */
@@ -7256,20 +7276,143 @@ index 8bb7b35..93a63b6 100644
  
  	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
  		this.session = session;
-@@ -210,6 +228,13 @@ export class FooterComponent implements Component {
- 			contextPercentStr = contextPercentDisplay;
+@@ -156,10 +187,10 @@ export class FooterComponent implements Component {
+ 
+ 	render(width: number): string[] {
+ 		const state = this.session.state;
+-		const { usageTotals, latestCacheHitRate, contextUsage } = this.getSessionStats();
++		const { usageTotals, contextUsage } = this.getSessionStats();
+ 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
+ 		const contextPercentValue = contextUsage?.percent ?? 0;
+-		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
++		const contextKnown = contextUsage?.percent !== null;
+ 
+ 		// Replace home directory with ~
+ 		let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
+@@ -176,49 +207,25 @@ export class FooterComponent implements Component {
+ 			pwd = `${pwd} • ${sessionName}`;
  		}
- 		statsParts.push(contextPercentStr);
+ 
+-		// Build stats line
+-		const statsParts = [];
+-		if (usageTotals.input) statsParts.push(`↑${formatTokens(usageTotals.input)}`);
+-		if (usageTotals.output) statsParts.push(`↓${formatTokens(usageTotals.output)}`);
+-		if (usageTotals.cacheRead) statsParts.push(`R${formatTokens(usageTotals.cacheRead)}`);
+-		if (usageTotals.cacheWrite) statsParts.push(`W${formatTokens(usageTotals.cacheWrite)}`);
+-		if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
+-			statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
+-		}
++		// Left side: three things a user reads at a glance, in the order they think about them —
++		// how full the window is, what this session has cost, and whether anything is running.
++		// Token counters, cache rates and context windows live in /cost, /trace and /context.
++		const parts: string[] = [renderContextMeter(contextPercentValue, contextKnown, contextWindow)];
+ 
+-		// Kimi Coding is subscription-backed despite using API-key authentication.
+ 		const usingSubscription = state.model
+ 			? state.model.provider === "kimi-coding" || this.session.modelRuntime.isUsingSubscription(state.model.provider)
+ 			: false;
+ 		if (usageTotals.cost || usingSubscription) {
+-			const costStr = `$${usageTotals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
+-			statsParts.push(costStr);
++			parts.push(theme.fg("dim", `$${usageTotals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`));
+ 		}
+ 
+-		// Colorize context percentage based on usage
+-		let contextPercentStr: string;
+-		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
+-		const contextPercentDisplay =
+-			contextPercent === "?"
+-				? `?/${formatTokens(contextWindow)}${autoIndicator}`
+-				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+-		if (contextPercentValue > 90) {
+-			contextPercentStr = theme.fg("error", contextPercentDisplay);
+-		} else if (contextPercentValue > 70) {
+-			contextPercentStr = theme.fg("warning", contextPercentDisplay);
+-		} else {
+-			contextPercentStr = contextPercentDisplay;
 +		if (this.reefFacts) {
 +			const { declaredTools, promptTokens, tier, jobs } = this.reefFacts;
-+			// Dim, because these are budget facts rather than usage: nothing here moves on its own.
-+			statsParts.push(theme.fg("dim", `⚙${declaredTools} ~${formatTokens(promptTokens)}`));
-+			statsParts.push(theme.fg(tier === "none" ? "warning" : "dim", tier));
-+			if (jobs > 0) statsParts.push(theme.fg("dim", `⧗${jobs}`));
-+		}
- 		if (areExperimentalFeaturesEnabled()) {
- 			statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
++			parts.push(theme.fg("dim", `${declaredTools} tools · ${formatTokens(promptTokens)} prompt · ${tier}`));
++			if (jobs > 0) parts.push(theme.fg("dim", `${jobs} running`));
  		}
+-		statsParts.push(contextPercentStr);
+-		if (areExperimentalFeaturesEnabled()) {
+-			statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
+-		}
+-
+-		let statsLeft = statsParts.join(" ");
+-
+-		// Add model name on the right side, plus thinking level if model supports it
+-		const modelName = state.model?.id || "no-model";
+ 
++		let statsLeft = parts.join(theme.fg("dim", "  ·  "));
+ 		let statsLeftWidth = visibleWidth(statsLeft);
+ 
+ 		// If statsLeft is too wide, truncate it
+@@ -231,16 +238,17 @@ export class FooterComponent implements Component {
+ 		const minPadding = 2;
+ 
+ 		// Add thinking level indicator if model supports reasoning
++		const modelName = state.model?.id || "no-model";
+ 		let rightSideWithoutProvider = modelName;
+ 		if (state.model?.reasoning) {
+ 			const thinkingLevel = state.thinkingLevel || "off";
+ 			rightSideWithoutProvider =
+-				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
++				thinkingLevel === "off" ? `${modelName} · thinking off` : `${modelName} · ${thinkingLevel}`;
+ 		}
+ 		// A virtual model routes each request; show where the latest response went.
+ 		const routed = this.session.routedModel;
+ 		if (routed) {
+-			const level = routed.thinkingLevel ? ` • ${routed.thinkingLevel}` : "";
++			const level = routed.thinkingLevel ? ` · ${routed.thinkingLevel}` : "";
+ 			rightSideWithoutProvider += ` → ${routed.model.id}${level}`;
+ 		}
+ 
+@@ -249,7 +257,6 @@ export class FooterComponent implements Component {
+ 		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
+ 			rightSide = `(${state.model!.provider}) ${rightSideWithoutProvider}`;
+ 			if (statsLeftWidth + minPadding + visibleWidth(rightSide) > width) {
+-				// Too wide, fall back
+ 				rightSide = rightSideWithoutProvider;
+ 			}
+ 		}
+@@ -259,32 +266,22 @@ export class FooterComponent implements Component {
+ 
+ 		let statsLine: string;
+ 		if (totalNeeded <= width) {
+-			// Both fit - add padding to right-align model
+ 			const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
+-			statsLine = statsLeft + padding + rightSide;
++			statsLine = statsLeft + padding + theme.fg("dim", rightSide);
+ 		} else {
+-			// Need to truncate right side
+ 			const availableForRight = width - statsLeftWidth - minPadding;
+ 			if (availableForRight > 0) {
+ 				const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
+ 				const truncatedRightWidth = visibleWidth(truncatedRight);
+ 				const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
+-				statsLine = statsLeft + padding + truncatedRight;
++				statsLine = statsLeft + padding + theme.fg("dim", truncatedRight);
+ 			} else {
+-				// Not enough space for right side at all
+ 				statsLine = statsLeft;
+ 			}
+ 		}
+ 
+-		// Apply dim to each part separately. statsLeft may contain color codes (for context %)
+-		// that end with a reset, which would clear an outer dim wrapper. So we dim the parts
+-		// before and after the colored section independently.
+-		const dimStatsLeft = theme.fg("dim", statsLeft);
+-		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
+-		const dimRemainder = theme.fg("dim", remainder);
+-
+ 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
+-		const lines = [pwdLine, dimStatsLeft + dimRemainder];
++		const lines = [pwdLine, statsLine];
+ 
+ 		// Add extension statuses on a single line, sorted by key alphabetically
+ 		const extensionStatuses = this.footerData.getExtensionStatuses();
 diff --git a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
 deleted file mode 100644
 index cd606a1..0000000
@@ -7362,7 +7505,7 @@ index 0000000..7f8c48e
 +	return `${fg(TEAL)}REEF${RESET}`;
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index 268a7fa..d93b208 100644
+index 268a7fa..67c592a 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 @@ -151,7 +151,8 @@ import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
@@ -7521,6 +7664,15 @@ index 268a7fa..d93b208 100644
  		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
  		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
  		this.outputPad = this.settingsManager.getOutputPad();
+@@ -3281,7 +3317,7 @@ export class InteractiveMode {
+ 
+ 	private setupEditorSubmitHandler(): void {
+ 		this.defaultEditor.onSubmit = async (text: string) => {
+-			text = text.trim();
++			text = this.expandSkillMentions(text.trim());
+ 			if (!text) return;
+ 
+ 			// Handle commands
 @@ -3724,6 +3760,8 @@ export class InteractiveMode {
  
  			case "tool_execution_end": {
@@ -7553,7 +7705,42 @@ index 268a7fa..d93b208 100644
  		const resumeCommand = formatResumeCommand(this.sessionManager);
  		if (resumeCommand) {
  			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
-@@ -7214,6 +7261,25 @@ export class InteractiveMode {
+@@ -4898,6 +4945,34 @@ export class InteractiveMode {
+ 		this.showStatus("Queued message for after compaction");
+ 	}
+ 
++	/**
++	 * Turn `skill:name` tags written mid-sentence into the skill block the model expects. The tag
++	 * is what the user typed (or picked from the "/" menu); the block is what carries the content.
++	 * Tags for skills that no longer exist are left as prose rather than silently dropped.
++	 */
++	private expandSkillMentions(text: string): string {
++		if (!text.includes("skill:")) return text;
++		const blocks: string[] = [];
++		let changed = false;
++		const prose = text
++			.replace(/(^|\s)skill:([A-Za-z0-9._-]+)/g, (match, lead: string, name: string) => {
++				const filePath = this.skillCommands.get(`skill:${name}`);
++				if (!filePath) return match;
++				try {
++					const content = fs.readFileSync(filePath, "utf8").trim();
++					blocks.push(`<skill name="${name}" location="${filePath}">\n${content}\n</skill>`);
++					changed = true;
++					return lead;
++				} catch {
++					return match;
++				}
++			})
++			.replace(/[ \t]{2,}/g, " ")
++			.trim();
++		if (!changed) return text;
++		return prose ? `${blocks.join("\n\n")}\n\n${prose}` : blocks.join("\n\n");
++	}
++
+ 	private isExtensionCommand(text: string): boolean {
+ 		if (!text.startsWith("/")) return false;
+ 
+@@ -7214,6 +7289,25 @@ export class InteractiveMode {
  	private async handleCompactCommand(customInstructions?: string): Promise<void> {
  		this.clearStatusIndicator();
  
@@ -7864,3 +8051,185 @@ index a09a3d0..0a4f5ac 100644
  
  	try {
  		const latestRelease = await getLatestPiRelease(currentVersion);
+diff --git a/packages/coding-agent/test/footer-width.test.ts b/packages/coding-agent/test/footer-width.test.ts
+index 12c074d..c38dac0 100644
+--- a/packages/coding-agent/test/footer-width.test.ts
++++ b/packages/coding-agent/test/footer-width.test.ts
+@@ -169,7 +169,7 @@ describe("FooterComponent width handling", () => {
+ 
+ 		const statsLine = stripAnsi(footer.render(120)[1]);
+ 
+-		expect(statsLine).toContain("auto \u2022 high \u2192 gpt-5.6-luna \u2022 medium");
++		expect(statsLine).toContain("auto \u00b7 high \u2192 gpt-5.6-luna \u00b7 medium");
+ 	});
+ 
+ 	it("includes summary and tool result usage in the total cost", () => {
+@@ -220,7 +220,7 @@ describe("FooterComponent width handling", () => {
+ 		expect(stripAnsi(footer.render(120)[1])).toContain("$1.000");
+ 	});
+ 
+-	it("shows the latest cache hit rate when cache usage is present", () => {
++	it("shows a context meter rather than raw token counters", () => {
+ 		const session = createSession({
+ 			sessionName: "",
+ 			usage: {
+@@ -234,7 +234,10 @@ describe("FooterComponent width handling", () => {
+ 		const footer = new FooterComponent(session, createFooterData(1));
+ 
+ 		const statsLine = stripAnsi(footer.render(120)[1]);
+-		expect(statsLine).toContain("CH25.0%");
++		// The meter is the thing a user reads; the cache rate lives in /cost and /trace.
++		expect(statsLine).toContain("▰");
++		expect(statsLine).not.toContain("CH");
++		expect(statsLine).not.toContain("cache");
+ 	});
+ 
+ 	it("marks Kimi Coding costs as subscription estimates", () => {
+diff --git a/packages/tui/src/autocomplete.ts b/packages/tui/src/autocomplete.ts
+index c652148..c14e4f1 100644
+--- a/packages/tui/src/autocomplete.ts
++++ b/packages/tui/src/autocomplete.ts
+@@ -332,6 +332,37 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
+ 			};
+ 		}
+ 
++		// A "/" typed mid-message tags a skill instead of invoking a command. Only skills are
++		// offered, only at a token boundary, and the accepted token stays in the sentence.
++		const mention = !options.force && !textBeforeCursor.trimStart().startsWith("/")
++			? /(?:^|[\s([{<`])(\/[^\s]*)$/.exec(textBeforeCursor)
++			: null;
++		if (mention) {
++			const token = mention[1] ?? "";
++			const query = token.slice(1);
++			const skills = this.commands
++				.map((cmd) => ({
++					name: "name" in cmd ? cmd.name : cmd.value,
++					description: cmd.description ?? "",
++				}))
++				.filter((cmd) => cmd.name.startsWith("skill:"));
++			const items = skills.map((skill) => ({
++				name: skill.name,
++				label: skill.name.slice("skill:".length),
++				description: skill.description,
++			}));
++			const matches = fuzzyFilter(items, query, (item) => item.label);
++			if (matches.length === 0) return null;
++			return {
++				items: matches.map((item) => ({
++					value: item.name,
++					label: item.label,
++					...(item.description && { description: item.description }),
++				})),
++				prefix: token,
++			};
++		}
++
+ 		const commandText = textBeforeCursor.trimStart();
+ 		if (!options.force && commandText.startsWith("/")) {
+ 			const spaceIndex = commandText.indexOf(" ");
+diff --git a/packages/tui/src/components/editor.ts b/packages/tui/src/components/editor.ts
+index 9fd3677..36e4787 100644
+--- a/packages/tui/src/components/editor.ts
++++ b/packages/tui/src/components/editor.ts
+@@ -1237,9 +1237,14 @@ export class Editor implements Component, Focusable {
+ 
+ 		// Check if we should trigger or update autocomplete
+ 		if (!this.autocompleteState) {
+-			// Auto-trigger for "/" at the start of a line (slash commands)
+-			if (char === "/" && this.isAtStartOfMessage()) {
+-				this.tryTriggerAutocomplete();
++			// Auto-trigger for "/" at the start of a line (slash commands) or at a token
++			// boundary anywhere in the message (skill tagging).
++			if (char === "/") {
++				const currentLine = this.state.lines[this.state.cursorLine] || "";
++				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
++				if (this.isAtStartOfMessage() || this.isInSkillMentionContext(textBeforeCursor)) {
++					this.tryTriggerAutocomplete();
++				}
+ 			}
+ 			// Auto-trigger for symbol-based completion like @, #, or provider triggers at token boundaries
+ 			else if (this.autocompleteTriggerCharacters.includes(char)) {
+@@ -1254,7 +1259,8 @@ export class Editor implements Component, Focusable {
+ 				const currentLine = this.state.lines[this.state.cursorLine] || "";
+ 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
+ 				// Check if we're in a slash command (with or without space for arguments)
+-				if (this.isInSlashCommandContext(textBeforeCursor)) {
++				// or typing the name of a skill tagged mid-message.
++				if (this.isInSlashCommandContext(textBeforeCursor) || this.isInSkillMentionContext(textBeforeCursor)) {
+ 					this.tryTriggerAutocomplete();
+ 				}
+ 				// Check if we're in a symbol-based completion context like @, #, or provider triggers
+@@ -2213,6 +2219,11 @@ export class Editor implements Component, Focusable {
+ 		return this.isSlashMenuAllowed() && textBeforeCursor.trimStart().startsWith("/");
+ 	}
+ 
++	/** A "/" that opens a token anywhere in the message, so a skill can be tagged mid-sentence. */
++	private isInSkillMentionContext(textBeforeCursor: string): boolean {
++		return this.isSlashMenuAllowed() && /(?:^|[\s([{<`])\/[^\s]*$/.test(textBeforeCursor);
++	}
++
+ 	// Autocomplete methods
+ 	/**
+ 	 * Find the best autocomplete item index for the given prefix.
+diff --git a/packages/tui/test/autocomplete-skill-slash.test.ts b/packages/tui/test/autocomplete-skill-slash.test.ts
+index 737fa66..65ae5ce 100644
+--- a/packages/tui/test/autocomplete-skill-slash.test.ts
++++ b/packages/tui/test/autocomplete-skill-slash.test.ts
+@@ -96,3 +96,57 @@ describe("CombinedAutocompleteProvider slash-command filter", () => {
+ 		assert.ok(items.includes("skill:brainstorm"));
+ 	});
+ });
++
++describe("skill tags written mid-message", () => {
++	const commands = [
++		{ name: "skill:impeccable", description: "Design and polish a frontend" },
++		{ name: "skill:humanizer", description: "Remove AI tells from prose" },
++		{ name: "model", description: "Select the active model" },
++	];
++
++	async function suggestionsFor(line: string) {
++		const provider = new CombinedAutocompleteProvider(commands, process.cwd());
++		const result = await provider.getSuggestions([line], 0, line.length, {
++			signal: new AbortController().signal,
++		});
++		assert.ok(result, `expected suggestions at the end of ${JSON.stringify(line)}`);
++		return { result, provider };
++	}
++
++	it("offers skills after a '/' inside a sentence", async () => {
++		const { result } = await suggestionsFor("please tighten the hero /imp");
++		assert.deepStrictEqual(
++			result.items.map((item) => item.label),
++			["impeccable"],
++		);
++		assert.equal(result.prefix, "/imp");
++	});
++
++	it("never offers ordinary commands mid-sentence", async () => {
++		const provider = new CombinedAutocompleteProvider(commands, process.cwd());
++		const line = "please tighten the hero /mod";
++		const result = await provider.getSuggestions([line], 0, line.length, {
++			signal: new AbortController().signal,
++		});
++		assert.equal(result, null);
++	});
++
++	it("replaces only the token and leaves the sentence intact", async () => {
++		const line = "tighten the hero /imp then stop";
++		const col = line.indexOf(" then");
++		const provider = new CombinedAutocompleteProvider(commands, process.cwd());
++		const result = await provider.getSuggestions([line], 0, col, { signal: new AbortController().signal });
++		assert.ok(result);
++		const applied = provider.applyCompletion([line], 0, col, result.items[0]!, result.prefix);
++		assert.equal(applied.lines[0], "tighten the hero skill:impeccable then stop");
++	});
++
++	it("ignores a '/' that is not at a token boundary", async () => {
++		const provider = new CombinedAutocompleteProvider(commands, process.cwd());
++		const line = "open src/impeccable";
++		const result = await provider.getSuggestions([line], 0, line.length, {
++			signal: new AbortController().signal,
++		});
++		assert.equal(result, null);
++	});
++});

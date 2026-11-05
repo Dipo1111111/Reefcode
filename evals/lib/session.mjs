@@ -80,3 +80,26 @@ export function summarize(entries) {
 		totalCost: parent.cost + delegated.cost,
 	};
 }
+
+/**
+ * The text the user actually saw. Grading must read this, not raw stdout: stdout carries tool
+ * output too, so a secret the model correctly refused to repeat still appears there after it
+ * reads the file that contains it.
+ */
+export function finalAssistantText(entries) {
+	for (let i = entries.length - 1; i >= 0; i -= 1) {
+		const entry = entries[i];
+		if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+		const content = entry.message.content;
+		if (typeof content === "string") return content.trim();
+		if (Array.isArray(content)) {
+			const text = content
+				.filter((part) => part?.type === "text" && typeof part.text === "string")
+				.map((part) => part.text)
+				.join("\n")
+				.trim();
+			if (text) return text;
+		}
+	}
+	return "";
+}

@@ -1237,9 +1237,14 @@ export class Editor implements Component, Focusable {
 
 		// Check if we should trigger or update autocomplete
 		if (!this.autocompleteState) {
-			// Auto-trigger for "/" at the start of a line (slash commands)
-			if (char === "/" && this.isAtStartOfMessage()) {
-				this.tryTriggerAutocomplete();
+			// Auto-trigger for "/" at the start of a line (slash commands) or at a token
+			// boundary anywhere in the message (skill tagging).
+			if (char === "/") {
+				const currentLine = this.state.lines[this.state.cursorLine] || "";
+				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
+				if (this.isAtStartOfMessage() || this.isInSkillMentionContext(textBeforeCursor)) {
+					this.tryTriggerAutocomplete();
+				}
 			}
 			// Auto-trigger for symbol-based completion like @, #, or provider triggers at token boundaries
 			else if (this.autocompleteTriggerCharacters.includes(char)) {
@@ -1254,7 +1259,8 @@ export class Editor implements Component, Focusable {
 				const currentLine = this.state.lines[this.state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 				// Check if we're in a slash command (with or without space for arguments)
-				if (this.isInSlashCommandContext(textBeforeCursor)) {
+				// or typing the name of a skill tagged mid-message.
+				if (this.isInSlashCommandContext(textBeforeCursor) || this.isInSkillMentionContext(textBeforeCursor)) {
 					this.tryTriggerAutocomplete();
 				}
 				// Check if we're in a symbol-based completion context like @, #, or provider triggers
@@ -2211,6 +2217,11 @@ export class Editor implements Component, Focusable {
 
 	private isInSlashCommandContext(textBeforeCursor: string): boolean {
 		return this.isSlashMenuAllowed() && textBeforeCursor.trimStart().startsWith("/");
+	}
+
+	/** A "/" that opens a token anywhere in the message, so a skill can be tagged mid-sentence. */
+	private isInSkillMentionContext(textBeforeCursor: string): boolean {
+		return this.isSlashMenuAllowed() && /(?:^|[\s([{<`])\/[^\s]*$/.test(textBeforeCursor);
 	}
 
 	// Autocomplete methods

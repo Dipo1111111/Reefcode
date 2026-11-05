@@ -169,7 +169,7 @@ describe("FooterComponent width handling", () => {
 
 		const statsLine = stripAnsi(footer.render(120)[1]);
 
-		expect(statsLine).toContain("auto \u2022 high \u2192 gpt-5.6-luna \u2022 medium");
+		expect(statsLine).toContain("auto \u00b7 high \u2192 gpt-5.6-luna \u00b7 medium");
 	});
 
 	it("includes summary and tool result usage in the total cost", () => {
@@ -220,7 +220,7 @@ describe("FooterComponent width handling", () => {
 		expect(stripAnsi(footer.render(120)[1])).toContain("$1.000");
 	});
 
-	it("shows the latest cache hit rate when cache usage is present", () => {
+	it("shows a context meter rather than raw token counters", () => {
 		const session = createSession({
 			sessionName: "",
 			usage: {
@@ -234,7 +234,10 @@ describe("FooterComponent width handling", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const statsLine = stripAnsi(footer.render(120)[1]);
-		expect(statsLine).toContain("CH25.0%");
+		// The meter is the thing a user reads; the cache rate lives in /cost and /trace.
+		expect(statsLine).toContain("▰");
+		expect(statsLine).not.toContain("CH");
+		expect(statsLine).not.toContain("cache");
 	});
 
 	it("marks Kimi Coding costs as subscription estimates", () => {

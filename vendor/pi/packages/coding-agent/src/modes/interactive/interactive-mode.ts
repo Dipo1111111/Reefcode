@@ -3317,7 +3317,7 @@ export class InteractiveMode {
 
 	private setupEditorSubmitHandler(): void {
 		this.defaultEditor.onSubmit = async (text: string) => {
-			text = text.trim();
+			text = this.expandSkillMentions(text.trim());
 			if (!text) return;
 
 			// Handle commands
@@ -4943,6 +4943,34 @@ export class InteractiveMode {
 		this.editor.setText("");
 		this.updatePendingMessagesDisplay();
 		this.showStatus("Queued message for after compaction");
+	}
+
+	/**
+	 * Turn `skill:name` tags written mid-sentence into the skill block the model expects. The tag
+	 * is what the user typed (or picked from the "/" menu); the block is what carries the content.
+	 * Tags for skills that no longer exist are left as prose rather than silently dropped.
+	 */
+	private expandSkillMentions(text: string): string {
+		if (!text.includes("skill:")) return text;
+		const blocks: string[] = [];
+		let changed = false;
+		const prose = text
+			.replace(/(^|\s)skill:([A-Za-z0-9._-]+)/g, (match, lead: string, name: string) => {
+				const filePath = this.skillCommands.get(`skill:${name}`);
+				if (!filePath) return match;
+				try {
+					const content = fs.readFileSync(filePath, "utf8").trim();
+					blocks.push(`<skill name="${name}" location="${filePath}">\n${content}\n</skill>`);
+					changed = true;
+					return lead;
+				} catch {
+					return match;
+				}
+			})
+			.replace(/[ \t]{2,}/g, " ")
+			.trim();
+		if (!changed) return text;
+		return prose ? `${blocks.join("\n\n")}\n\n${prose}` : blocks.join("\n\n");
 	}
 
 	private isExtensionCommand(text: string): boolean {
