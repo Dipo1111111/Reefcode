@@ -2493,6 +2493,32 @@ index 2084d6f..4cd56b1 100644
  						: {}),
  					exit_code: exitCode,
  					wall_time_seconds: wallTimeSeconds,
+diff --git a/packages/coding-agent/src/core/tools/edit.ts b/packages/coding-agent/src/core/tools/edit.ts
+index bb6aeff..31b2042 100644
+--- a/packages/coding-agent/src/core/tools/edit.ts
++++ b/packages/coding-agent/src/core/tools/edit.ts
+@@ -119,6 +119,21 @@ function prepareEditArguments(input: unknown): EditToolInput {
+ 		args.edits = [args.edits];
+ 	}
+ 
++	// The Claude-style spelling: `old_string`/`new_string` (and `file_path`), which many models emit
++	// from habit. Before this, that spelling failed schema validation and cost a whole turn — the
++	// model then had to read the error and retry. Accepting it is cheaper than teaching it.
++	if (args.edits === undefined) {
++		const oldString = args.old_string ?? args.oldText;
++		const newString = args.new_string ?? args.newText;
++		if (typeof oldString === "string" && typeof newString === "string") {
++			const { old_string: _o, new_string: _n, oldText: _ot, newText: _nt, file_path: filePath, ...rest } = args;
++			return {
++				...(filePath !== undefined && rest.path === undefined ? { path: filePath } : rest),
++				edits: [{ oldText: oldString, newText: newString }],
++			} as EditToolInput;
++		}
++	}
++
+ 	const legacy = args as LegacyEditToolInput;
+ 	if (typeof legacy.oldText !== "string" || typeof legacy.newText !== "string") {
+ 		return args as EditToolInput;
 diff --git a/packages/coding-agent/src/core/tools/read.ts b/packages/coding-agent/src/core/tools/read.ts
 index 8fb93a6..de1a344 100644
 --- a/packages/coding-agent/src/core/tools/read.ts
@@ -2529,6 +2555,27 @@ index 8fb93a6..de1a344 100644
  								// Apply truncation, respecting both line and byte limits.
  								const truncation = truncateHead(selectedContent);
  								let outputText: string;
+diff --git a/packages/coding-agent/src/core/tools/write.ts b/packages/coding-agent/src/core/tools/write.ts
+index 9e6b296..c46de82 100644
+--- a/packages/coding-agent/src/core/tools/write.ts
++++ b/packages/coding-agent/src/core/tools/write.ts
+@@ -82,7 +82,15 @@ export function createWriteToolDefinition(
+ 				throwIfAborted();
+ 
+ 				return {
+-					content: [{ type: "text", text: `Successfully wrote to ${path}` }],
++					// The size, so the next turn is not spent on `wc -c`: a model asked to keep a file
++					// under a limit checked the byte count with bash right after a write that could
++					// have told it.
++					content: [
++						{
++							type: "text",
++							text: `Successfully wrote to ${path} (${Buffer.byteLength(content, "utf8")} bytes)`,
++						},
++					],
+ 					details: undefined,
+ 				};
+ 			});
 diff --git a/packages/coding-agent/src/extensions/codemode/description.test.ts b/packages/coding-agent/src/extensions/codemode/description.test.ts
 new file mode 100644
 index 0000000..0def657
@@ -2629,7 +2676,7 @@ index 0000000..38bffec
 +	});
 +});
 diff --git a/packages/coding-agent/src/extensions/codemode/execute.ts b/packages/coding-agent/src/extensions/codemode/execute.ts
-index b363599..e62105a 100644
+index b363599..585cc42 100644
 --- a/packages/coding-agent/src/extensions/codemode/execute.ts
 +++ b/packages/coding-agent/src/extensions/codemode/execute.ts
 @@ -20,7 +20,7 @@ import {
@@ -2675,7 +2722,18 @@ index b363599..e62105a 100644
  	const calls: CodemodeNestedCall[] = [];
  	// Usage of the script's `models.*` calls. Nested tool calls report theirs through the session.
  	let modelUsage: Usage | undefined;
-@@ -538,6 +544,7 @@ export async function executeCodemode(
+@@ -522,6 +528,10 @@ export async function executeCodemode(
+ 	const samples = new Map(
+ 		callable.map((tool) => [tool.name, renderToolSample(toCodemodeDeclaration(tool, guidelines?.get(tool.name)))]),
+ 	);
++	// Names every other harness uses for the same operation. The model reaches for `tools.shell` or
++	// `tools.exec` from habit, and a missing member costs a whole turn even though the error names
++	// `bash`. The alias is a real callable, not a suggestion, so the habit costs nothing.
++	const ALIASES: Record<string, string> = { shell: "bash", exec: "bash" };
+ 	const sandboxTools: CodemodeTool[] = callable.map((tool) => ({
+ 		name: tool.name,
+ 		description: samples.get(tool.name),
+@@ -538,6 +548,7 @@ export async function executeCodemode(
  			// Only tools from ctx.tools are callable, so ctx is set here.
  			if (!ctx) throw new Error("Tool calls need a session");
  			const outcome = await ctx.executeTool(tool.name, args, { signal: callSignal });
@@ -2683,7 +2741,20 @@ index b363599..e62105a 100644
  			record.id = outcome.toolCall.id;
  			record.durationMs = performance.now() - callStartedAt;
  			if (outcome.isError) {
-@@ -601,7 +608,7 @@ export async function executeCodemode(
+@@ -551,6 +562,12 @@ export async function executeCodemode(
+ 		},
+ 	}));
+ 
++	for (const [alias, target] of Object.entries(ALIASES)) {
++		if (sandboxTools.some((tool) => tool.name === alias)) continue;
++		const source = sandboxTools.find((tool) => tool.name === target);
++		if (source) sandboxTools.push({ ...source, name: alias });
++	}
++
+ 	// The wait for a worker counts toward the script's deadline.
+ 	const deadline = sourceOptions.timeoutMs ?? Number.POSITIVE_INFINITY;
+ 	const waitStartedAt = performance.now();
+@@ -601,7 +618,7 @@ export async function executeCodemode(
  			},
  		});
  		const store = ctx ? readCodemodeStore(ctx.sessionManager.getBranch()) : {};
@@ -2692,7 +2763,7 @@ index b363599..e62105a 100644
  	} finally {
  		await sandbox?.close();
  		if (reserved) {
-@@ -640,7 +647,7 @@ export async function executeCodemode(
+@@ -640,7 +657,7 @@ export async function executeCodemode(
  	// next to its image and is never cut.
  	const output = joinAdjacentText(await saveImages(truncated.items));
  	const wallTime = ((performance.now() - startedAt) / 1000).toFixed(1);
@@ -2701,7 +2772,7 @@ index b363599..e62105a 100644
  	const details = snapshot();
  	if (truncated.fullOutputPath) details.fullOutputPath = truncated.fullOutputPath;
  	return {
-@@ -679,6 +686,14 @@ function createDiscoveryGlobals(
+@@ -679,6 +696,14 @@ function createDiscoveryGlobals(
  			spread: true,
  			execute: (args) => {
  				const [query, searchOptions] = args as [unknown, { limit?: unknown; namespace?: unknown } | undefined];
@@ -2716,7 +2787,7 @@ index b363599..e62105a 100644
  				if (typeof query !== "string") throw new Error("searchTools() expects a query string");
  				const limit = searchOptions?.limit ?? DEFAULT_TOOL_SEARCH_LIMIT;
  				if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
-@@ -701,6 +716,9 @@ function createDiscoveryGlobals(
+@@ -701,6 +726,9 @@ function createDiscoveryGlobals(
  			spread: true,
  			execute: (args) => {
  				const [name] = args as unknown[];
@@ -2726,7 +2797,7 @@ index b363599..e62105a 100644
  				if (typeof name !== "string") throw new Error("describeTool() expects a tool name");
  				const tool = tools.find(
  					(candidate) => candidate.name === name || toCodemodeIdentifier(candidate.name) === name,
-@@ -713,6 +731,17 @@ function createDiscoveryGlobals(
+@@ -713,6 +741,17 @@ function createDiscoveryGlobals(
  			spread: true,
  			execute: (args) => {
  				const [name] = args as unknown[];
@@ -3005,8 +3076,43 @@ index 660803e..2b534f4 100644
  		const component = (context.lastComponent as Container | undefined) ?? new Container();
  		component.clear();
  		if (code === null) {
+diff --git a/packages/coding-agent/src/extensions/codemode/shape.test.ts b/packages/coding-agent/src/extensions/codemode/shape.test.ts
+new file mode 100644
+index 0000000..4bed545
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/codemode/shape.test.ts
+@@ -0,0 +1,29 @@
++import { describe, expect, it } from "vitest";
++import { createCodemodeDescription } from "./tool.ts";
++
++const edit = {
++	name: "edit",
++	description: "Edit a file.",
++	parameters: {
++		type: "object",
++		properties: {
++			path: { type: "string" },
++			edits: {
++				type: "array",
++				items: {
++					type: "object",
++					properties: { oldText: { type: "string" }, newText: { type: "string" } },
++					required: ["oldText", "newText"],
++				},
++			},
++		},
++		required: ["path", "edits"],
++	},
++} as never;
++
++describe("the compact listing shows argument shape", () => {
++	it("names the fields inside an array, so a caller does not guess the edit spelling", () => {
++		const text = createCodemodeDescription([edit], { compact: true });
++		expect(text).toContain("edits: [{ oldText, newText }]");
++	});
++});
 diff --git a/packages/coding-agent/src/extensions/codemode/tool.ts b/packages/coding-agent/src/extensions/codemode/tool.ts
-index 648ba61..081f968 100644
+index 648ba61..5cc47a7 100644
 --- a/packages/coding-agent/src/extensions/codemode/tool.ts
 +++ b/packages/coding-agent/src/extensions/codemode/tool.ts
 @@ -33,10 +33,13 @@ import type { ModelRegistry } from "../../core/model-registry.ts";
@@ -3143,7 +3249,7 @@ index 648ba61..081f968 100644
 +/** One line: `- read({ path, offset?, limit? }) → string`. */
 +function renderCompactSection(declaration: Omit<CodemodeTool, "execute">): string {
 +	const id = toCodemodeIdentifier(declaration.name);
-+	const args = describeFields(declaration.inputSchema, 0) ?? "{ args }";
++	const args = describeFields(declaration.inputSchema, 1) ?? "{ args }";
 +	const output = describeOutput(declaration.name, declaration.outputSchema);
 +	return `- \`tools.${id}(${args})\` → ${output}`;
 +}
@@ -3178,7 +3284,37 @@ index 648ba61..081f968 100644
  	const toolSections = ["Nested tools:"];
  	for (const { namespace, entries } of ordered) {
  		const visible = entries.filter((entry) => shown.has(entry.name));
-@@ -340,7 +410,10 @@ function describeScriptCall(tool: AgentTool<any>): string {
+@@ -285,13 +355,28 @@ function describeFields(schema: unknown, depth: number): string | undefined {
+ 			constValue !== undefined
+ 				? JSON.stringify(constValue)
+ 				: depth > 0
+-					? describeFields(field, depth - 1)
++					? (describeFields(field, depth - 1) ?? describeItems(field, depth))
+ 					: undefined;
+ 		return `${name}${requiredNames.has(name) ? "" : "?"}${nested ? `: ${nested}` : ""}`;
+ 	});
+ 	return `{ ${fields.join(", ")} }`;
+ }
+ 
++/**
++ * The shape of an array field, `\`[{ oldText, newText }]\``. Without this the listing said only
++ * `edits`, and a model asked to change a file guessed `old_string`/`new_string` — the spelling every
++ * other harness uses — then spent a turn on the validation error. The shape is one line; the turn
++ * was a full prompt.
++ */
++function describeItems(schema: unknown, depth: number): string | undefined {
++	if (typeof schema !== "object" || schema === null) return undefined;
++	const { type, items } = schema as Record<string, unknown>;
++	if (type !== "array" || typeof items !== "object" || items === null) return undefined;
++	if (depth <= 0) return undefined;
++	const nested = describeFields(items, depth - 1) ?? describeItems(items, depth - 1);
++	return nested ? `[${nested}]` : undefined;
++}
++
+ /**
+  * What a script call resolves to, in one line: `a string`, the field names of an object (see
+  * {@link describeFields}), the field names of each object in a union, the rendered type when it
+@@ -340,7 +425,10 @@ function describeScriptCall(tool: AgentTool<any>): string {
   * Listing by exposure, not by the active set, keeps the codemode description unchanged when
   * `tool_search` loads a tool, so loads do not redeclare codemode.
   */
@@ -3190,7 +3326,7 @@ index 648ba61..081f968 100644
  	const mode = options.getMode?.() ?? SETTINGS_DEFAULTS.codemode.mode;
  	const isDirect = (tool: AgentTool) => loadout.getExposure(tool.name) === "direct";
  	const callable = getCodemodeCallableTools(loadout.callable);
-@@ -351,7 +424,14 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+@@ -351,7 +439,14 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
  			if (callableNames.has(tool.name)) descriptions[tool.name] = describeScriptCall(tool);
  		}
  	}
@@ -3206,7 +3342,7 @@ index 648ba61..081f968 100644
  	const namespaces = new Map(
  		listed.flatMap((tool) => {
  			const namespace = loadout.getNamespace(tool.name);
-@@ -360,6 +440,7 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+@@ -360,6 +455,7 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
  	);
  	const guidelines = new Map(listed.map((tool) => [tool.name, loadout.getPromptGuidelines(tool.name)] as const));
  	descriptions[CODEMODE_TOOL_NAME] = createCodemodeDescription(listed, {
@@ -3214,7 +3350,7 @@ index 648ba61..081f968 100644
  		models: options.models === true,
  		namespaces,
  		guidelines,
-@@ -369,13 +450,21 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+@@ -369,13 +465,21 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
  		inlineBudget: options.getInlineBudget?.() ?? DEFAULT_CODEMODE_INLINE_BUDGET,
  	});
  	const declaredNames = new Set(loadout.declared.map((tool) => tool.name));
@@ -3243,7 +3379,7 @@ index 648ba61..081f968 100644
  }
  
  /** Script globals that list or look up tools and namespaces, which the script may then call by any name. */
-@@ -391,6 +480,33 @@ function getScriptReach(code: unknown): "all" | readonly string[] {
+@@ -391,6 +495,33 @@ function getScriptReach(code: unknown): "all" | readonly string[] {
  	return DISCOVERY_GLOBALS.test(code) ? "all" : (code.match(/\w+/g) ?? []);
  }
  
@@ -3277,7 +3413,7 @@ index 648ba61..081f968 100644
  export function createCodemodeToolDefinition(
  	options: CodemodeToolOptions = {},
  ): ToolDefinition<typeof codemodeSchema, CodemodeToolDetails | undefined> {
-@@ -404,13 +520,63 @@ export function createCodemodeToolDefinition(
+@@ -404,13 +535,63 @@ export function createCodemodeToolDefinition(
  		parameters: codemodeSchema,
  		// Scripts must not start other scripts.
  		exposure: "model-only",

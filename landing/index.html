@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reef — the coding agent in your terminal</title>
+<meta name="description" content="A coding agent that reads before it writes, runs commands instead of guessing, and keeps every step inspectable.">
+<style>
+:root{
+  --bg:#0b0f14; --panel:#121821; --ink:#e6edf3; --dim:#8b98a8;
+  --line:#1e2836; --accent:#2dd4bf; --warm:#f0b429;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+  background-image:radial-gradient(60% 45% at 50% 0%,#12222a 0,transparent 70%);
+}
+.wrap{max-width:960px;margin:0 auto;padding:0 24px}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* nav */
+header{border-bottom:1px solid var(--line)}
+nav{display:flex;align-items:center;justify-content:space-between;padding:18px 0;gap:16px}
+.mark{font-family:var(--mono);font-weight:600;letter-spacing:.08em;font-size:14px;color:var(--ink)}
+.mark span{color:var(--accent)}
+nav ul{display:flex;gap:22px;list-style:none;margin:0;padding:0;font-size:14px}
+nav ul a{color:var(--dim)}
+nav ul a:hover{color:var(--ink);text-decoration:none}
+@media(max-width:640px){nav ul{display:none}}
+
+/* hero */
+.hero{padding:88px 0 64px}
+.eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--warm);margin:0 0 20px}
+h1{
+  font-size:clamp(2.1rem,6vw,3.6rem);line-height:1.08;letter-spacing:-.03em;
+  margin:0 0 20px;font-weight:650;max-width:16ch;
+}
+h1 em{font-style:normal;color:var(--accent)}
+.lede{font-size:clamp(1rem,2.2vw,1.15rem);color:var(--dim);max-width:52ch;margin:0 0 34px}
+.lede strong{color:var(--ink);font-weight:500}
+.cta{display:flex;flex-wrap:wrap;gap:12px}
+.btn{
+  display:inline-block;padding:12px 20px;border-radius:8px;font-size:14px;font-weight:600;
+  border:1px solid var(--line);color:var(--ink);background:var(--panel);
+}
+.btn:hover{border-color:var(--accent);text-decoration:none}
+.btn.primary{background:var(--accent);color:#04231f;border-color:transparent}
+.btn.primary:hover{filter:brightness(1.1)}
+
+/* terminal */
+.term{
+  margin:56px 0 0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#080b10;
+}
+.bar{
+  display:flex;gap:6px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line);
+  background:var(--panel);font-family:var(--mono);font-size:12px;color:var(--dim);
+}
+.dot{width:9px;height:9px;border-radius:50%;background:#243244}
+.bar b{margin-left:8px;font-weight:500}
+.term pre{
+  margin:0;padding:18px;overflow-x:auto;font-family:var(--mono);font-size:13px;line-height:1.75;color:#c9d4e0;
+}
+.term .p{color:var(--accent)}
+.term .c{color:#5f6f82}
+.term .s{color:var(--warm)}
+
+/* sections */
+section{padding:64px 0;border-top:1px solid var(--line)}
+h2{font-size:1.35rem;letter-spacing:-.02em;margin:0 0 8px;font-weight:600}
+.sub{color:var(--dim);font-size:14px;margin:0 0 34px;max-width:60ch}
+.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.card{
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px;
+}
+.card h3{margin:0 0 8px;font-size:15px;font-weight:600;letter-spacing:-.01em}
+.card h3 code{font-family:var(--mono);font-size:12px;color:var(--accent);background:#0e1c22;padding:2px 6px;border-radius:5px}
+.card p{margin:0;color:var(--dim);font-size:14px}
+
+/* principles */
+.rows{margin:0;padding:0;list-style:none;border-top:1px solid var(--line)}
+.rows li{display:grid;grid-template-columns:44px 1fr;gap:16px;padding:18px 0;border-bottom:1px solid var(--line);align-items:baseline}
+.rows i{font-family:var(--mono);font-style:normal;font-size:12px;color:var(--warm)}
+.rows strong{display:block;font-weight:600;font-size:15px}
+.rows p{margin:4px 0 0;color:var(--dim);font-size:14px;max-width:62ch}
+
+/* close */
+.close{padding:72px 0;text-align:center}
+.close p{color:var(--dim);max-width:46ch;margin:0 auto 26px}
+footer{border-top:1px solid var(--line);padding:26px 0;color:#5f6f82;font-size:13px;display:flex;flex-wrap:wrap;gap:14px;justify-content:space-between}
+footer a{color:var(--dim)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <nav>
+      <div class="mark">REEF<span>_</span>AGENT</div>
+      <ul>
+        <li><a href="#work">How I work</a></li>
+        <li><a href="#principles">Principles</a></li>
+        <li><a href="#start">Start</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="hero">
+    <p class="eyebrow">Coding agent · terminal native</p>
+    <h1>I read before I write. Then I <em>run</em> it.</h1>
+    <p class="lede">I'm a coding agent that works where your code does: the shell. Instead of guessing what a file contains, I open it. Instead of describing a command, I run it — and show you the output. <strong>Every step stays inspectable.</strong></p>
+    <div class="cta">
+      <a class="btn primary" href="#start">Get started</a>
+      <a class="btn" href="#work">See a session</a>
+    </div>
+  </div>
+
+  <div class="term">
+    <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><b>~/project — reef</b></div>
+<pre><span class="p">you</span>  fix the failing auth test, then check nothing else broke
+
+<span class="p">me</span>   <span class="c"># one step: read the test, the module, and the last failure</span>
+      script: read ×3 → run → parse
+
+      <span class="s">✓</span> tests/auth.test.ts        expect 401, got 200
+      <span class="s">✓</span> auth/session.ts           token expiry compared as string
+      <span class="s">✓</span> patch applied             1 file, 4 lines
+      <span class="s">✓</span> suite re-run              142 passed, 0 failed
+
+<span class="p">you</span>  good — ship it</pre>
+  </div>
+
+  <section id="work">
+    <h2>What that means in practice</h2>
+    <p class="sub">Four habits, not four features.</p>
+    <div class="grid">
+      <div class="card">
+        <h3><code>script</code> instead of twenty turns</h3>
+        <p>Reads, greps and test runs happen inside one programmatic step. You see the result, not the round trips.</p>
+      </div>
+      <div class="card">
+        <h3>Evidence, not confidence</h3>
+        <p>A claim about your codebase comes with the command that proves it. If I couldn't verify it, I say so.</p>
+      </div>
+      <div class="card">
+        <h3>Small, reviewable diffs</h3>
+        <p>Edits land at the path you can grep for. No rewritten files, no surprise formatting, no mystery output.</p>
+      </div>
+      <div class="card">
+        <h3>Stops before it hurts</h3>
+        <p>Read freely; ask before anything destructive. The boundary is policy, and you write the policy.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="principles">
+    <h2>How I'm built</h2>
+    <p class="sub">The rules I don't get to bend.</p>
+    <ul class="rows">
+      <li><i>01</i><div><strong>Read the code, not the docs about it</strong><p>When a description and the source disagree, the source is right. Same for the tracker and the design notes.</p></div></li>
+      <li><i>02</i><div><strong>One tool surface, every model</strong><p>No per-model prompting tricks. Consistency beats tuning you can't reproduce.</p></div></li>
+      <li><i>03</i><div><strong>Context is a budget</strong><p>Long transcripts are expensive and slow. I fetch what I need, when I need it, and drop the rest.</p></div></li>
+      <li><i>04</i><div><strong>Autonomy has a ceiling</strong><p>The loop decides how far to go, not the prompt. You set the ceiling once; I respect it every turn.</p></div></li>
+    </ul>
+  </section>
+
+  <section class="close" id="start">
+    <h2>Point me at a repo</h2>
+    <p>Ask a question, hand me a bug, or just say "look around and tell me what's wrong". I'll start by reading.</p>
+    <div class="cta" style="justify-content:center">
+      <a class="btn primary" href="#work">Run your first session</a>
+      <a class="btn" href="#principles">Read the principles</a>
+    </div>
+  </section>
+
+  <footer>
+    <span>Built for people who live in a terminal.</span>
+    <span><a href="#work">How I work</a> · <a href="#principles">Principles</a> · <a href="#start">Start</a></span>
+  </footer>
+
+</div>
+</body>
+</html>

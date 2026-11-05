@@ -237,7 +237,7 @@ function renderToolSection(declaration: Omit<CodemodeTool, "execute">): string {
 /** One line: `- read({ path, offset?, limit? }) → string`. */
 function renderCompactSection(declaration: Omit<CodemodeTool, "execute">): string {
 	const id = toCodemodeIdentifier(declaration.name);
-	const args = describeFields(declaration.inputSchema, 0) ?? "{ args }";
+	const args = describeFields(declaration.inputSchema, 1) ?? "{ args }";
 	const output = describeOutput(declaration.name, declaration.outputSchema);
 	return `- \`tools.${id}(${args})\` → ${output}`;
 }
@@ -355,11 +355,26 @@ function describeFields(schema: unknown, depth: number): string | undefined {
 			constValue !== undefined
 				? JSON.stringify(constValue)
 				: depth > 0
-					? describeFields(field, depth - 1)
+					? (describeFields(field, depth - 1) ?? describeItems(field, depth))
 					: undefined;
 		return `${name}${requiredNames.has(name) ? "" : "?"}${nested ? `: ${nested}` : ""}`;
 	});
 	return `{ ${fields.join(", ")} }`;
+}
+
+/**
+ * The shape of an array field, `\`[{ oldText, newText }]\``. Without this the listing said only
+ * `edits`, and a model asked to change a file guessed `old_string`/`new_string` — the spelling every
+ * other harness uses — then spent a turn on the validation error. The shape is one line; the turn
+ * was a full prompt.
+ */
+function describeItems(schema: unknown, depth: number): string | undefined {
+	if (typeof schema !== "object" || schema === null) return undefined;
+	const { type, items } = schema as Record<string, unknown>;
+	if (type !== "array" || typeof items !== "object" || items === null) return undefined;
+	if (depth <= 0) return undefined;
+	const nested = describeFields(items, depth - 1) ?? describeItems(items, depth - 1);
+	return nested ? `[${nested}]` : undefined;
 }
 
 /**

@@ -119,6 +119,21 @@ function prepareEditArguments(input: unknown): EditToolInput {
 		args.edits = [args.edits];
 	}
 
+	// The Claude-style spelling: `old_string`/`new_string` (and `file_path`), which many models emit
+	// from habit. Before this, that spelling failed schema validation and cost a whole turn — the
+	// model then had to read the error and retry. Accepting it is cheaper than teaching it.
+	if (args.edits === undefined) {
+		const oldString = args.old_string ?? args.oldText;
+		const newString = args.new_string ?? args.newText;
+		if (typeof oldString === "string" && typeof newString === "string") {
+			const { old_string: _o, new_string: _n, oldText: _ot, newText: _nt, file_path: filePath, ...rest } = args;
+			return {
+				...(filePath !== undefined && rest.path === undefined ? { path: filePath } : rest),
+				edits: [{ oldText: oldString, newText: newString }],
+			} as EditToolInput;
+		}
+	}
+
 	const legacy = args as LegacyEditToolInput;
 	if (typeof legacy.oldText !== "string" || typeof legacy.newText !== "string") {
 		return args as EditToolInput;

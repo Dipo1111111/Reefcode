@@ -82,7 +82,15 @@ export function createWriteToolDefinition(
 				throwIfAborted();
 
 				return {
-					content: [{ type: "text", text: `Successfully wrote to ${path}` }],
+					// The size, so the next turn is not spent on `wc -c`: a model asked to keep a file
+					// under a limit checked the byte count with bash right after a write that could
+					// have told it.
+					content: [
+						{
+							type: "text",
+							text: `Successfully wrote to ${path} (${Buffer.byteLength(content, "utf8")} bytes)`,
+						},
+					],
 					details: undefined,
 				};
 			});

@@ -528,6 +528,10 @@ export async function executeCodemode(
 	const samples = new Map(
 		callable.map((tool) => [tool.name, renderToolSample(toCodemodeDeclaration(tool, guidelines?.get(tool.name)))]),
 	);
+	// Names every other harness uses for the same operation. The model reaches for `tools.shell` or
+	// `tools.exec` from habit, and a missing member costs a whole turn even though the error names
+	// `bash`. The alias is a real callable, not a suggestion, so the habit costs nothing.
+	const ALIASES: Record<string, string> = { shell: "bash", exec: "bash" };
 	const sandboxTools: CodemodeTool[] = callable.map((tool) => ({
 		name: tool.name,
 		description: samples.get(tool.name),
@@ -557,6 +561,12 @@ export async function executeCodemode(
 			return toScriptValue(tool, outcome);
 		},
 	}));
+
+	for (const [alias, target] of Object.entries(ALIASES)) {
+		if (sandboxTools.some((tool) => tool.name === alias)) continue;
+		const source = sandboxTools.find((tool) => tool.name === target);
+		if (source) sandboxTools.push({ ...source, name: alias });
+	}
 
 	// The wait for a worker counts toward the script's deadline.
 	const deadline = sourceOptions.timeoutMs ?? Number.POSITIVE_INFINITY;
