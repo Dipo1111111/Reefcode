@@ -690,18 +690,32 @@ index b363599..a9e2b0a 100644
  	if (truncated.fullOutputPath) details.fullOutputPath = truncated.fullOutputPath;
  	return {
 diff --git a/packages/coding-agent/src/extensions/codemode/index.ts b/packages/coding-agent/src/extensions/codemode/index.ts
-index 67492b6..c49dca1 100644
+index 67492b6..3ebc8c1 100644
 --- a/packages/coding-agent/src/extensions/codemode/index.ts
 +++ b/packages/coding-agent/src/extensions/codemode/index.ts
-@@ -10,6 +10,7 @@ import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types
+@@ -10,6 +10,8 @@ import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types
  import { SETTINGS_DEFAULTS } from "../../core/settings-defaults.ts";
  import type { CodemodeMode } from "../../core/settings-manager.ts";
  import { createCodemodeToolDefinition } from "./tool.ts";
 +import { createWaitForScriptToolDefinition } from "./wait.ts";
++import { markInterrupted, SCRIPT_JOB_ENTRY_TYPE } from "./jobs.ts";
  
  export interface CodemodeExtensionOptions {
  	/** Overrides the `codemode.mode` setting. */
-@@ -34,6 +35,7 @@ export function createCodemodeExtension(options: CodemodeExtensionOptions = {}):
+@@ -31,9 +33,20 @@ function readInlineBudget(pi: ExtensionAPI): number | undefined {
+ 
+ export function createCodemodeExtension(options: CodemodeExtensionOptions = {}): ExtensionFactory {
+ 	return (pi) => {
++		// A job that was running when the process ended can never finish. Say so once per session
++		// start instead of leaving a row that looks alive forever.
++		pi.on("session_start", async (event) => {
++			if (event.reason === "startup" || event.reason === "new") return undefined;
++			for (const entry of markInterrupted()) {
++				pi.appendEntry(SCRIPT_JOB_ENTRY_TYPE, entry);
++			}
++			return undefined;
++		});
++
  		pi.registerTool({
  			...createCodemodeToolDefinition({
  				appendEntry: (customType, data) => pi.appendEntry(customType, data),
@@ -709,7 +723,7 @@ index 67492b6..c49dca1 100644
  				models: options.models ?? true,
  				getToolNamespace: (name) => pi.getAllTools().find((tool) => tool.name === name)?.namespace,
  				getToolGuidelines: () =>
-@@ -41,7 +43,12 @@ export function createCodemodeExtension(options: CodemodeExtensionOptions = {}):
+@@ -41,7 +54,12 @@ export function createCodemodeExtension(options: CodemodeExtensionOptions = {}):
  				getMode: () => options.mode ?? readMode(pi),
  				getInlineBudget: () => options.inlineBudget ?? readInlineBudget(pi),
  			}),

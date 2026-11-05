@@ -11,6 +11,7 @@ import { SETTINGS_DEFAULTS } from "../../core/settings-defaults.ts";
 import type { CodemodeMode } from "../../core/settings-manager.ts";
 import { createCodemodeToolDefinition } from "./tool.ts";
 import { createWaitForScriptToolDefinition } from "./wait.ts";
+import { markInterrupted, SCRIPT_JOB_ENTRY_TYPE } from "./jobs.ts";
 
 export interface CodemodeExtensionOptions {
 	/** Overrides the `codemode.mode` setting. */
@@ -32,6 +33,16 @@ function readInlineBudget(pi: ExtensionAPI): number | undefined {
 
 export function createCodemodeExtension(options: CodemodeExtensionOptions = {}): ExtensionFactory {
 	return (pi) => {
+		// A job that was running when the process ended can never finish. Say so once per session
+		// start instead of leaving a row that looks alive forever.
+		pi.on("session_start", async (event) => {
+			if (event.reason === "startup" || event.reason === "new") return undefined;
+			for (const entry of markInterrupted()) {
+				pi.appendEntry(SCRIPT_JOB_ENTRY_TYPE, entry);
+			}
+			return undefined;
+		});
+
 		pi.registerTool({
 			...createCodemodeToolDefinition({
 				appendEntry: (customType, data) => pi.appendEntry(customType, data),
