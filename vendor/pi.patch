@@ -2315,6 +2315,45 @@ index 1ef7973..b505597 100644
  export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust"]>;
  export type QuietStartup = NonNullable<SettingsInput["quietStartup"]>;
  export type TransportSetting = NonNullable<SettingsInput["transport"]>;
+diff --git a/packages/coding-agent/src/core/skills.ts b/packages/coding-agent/src/core/skills.ts
+index 48df453..a91a093 100644
+--- a/packages/coding-agent/src/core/skills.ts
++++ b/packages/coding-agent/src/core/skills.ts
+@@ -374,12 +374,12 @@ export function formatSkillsForPrompt(skills: Skill[], fileReadTool: "read" | "b
+ 		"<available_skills>",
+ 	];
+ 
++	// REEF: one line per skill, description capped. The XML form spent five lines and the full
++	// description on every skill: the owner's eight skills came to ~1,250 tokens on every request, and
++	// two descriptions were ~900 characters each. The name, the gist, and the path are what the choice
++	// needs; the file has the rest.
+ 	for (const skill of visibleSkills) {
+-		lines.push("  <skill>");
+-		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
+-		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
+-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
+-		lines.push("  </skill>");
++		lines.push(`- ${escapeXml(skill.name)}: ${escapeXml(capDescription(skill.description))} (${escapeXml(skill.filePath)})`);
+ 	}
+ 
+ 	lines.push("</available_skills>");
+@@ -387,6 +387,16 @@ export function formatSkillsForPrompt(skills: Skill[], fileReadTool: "read" | "b
+ 	return lines.join("\n");
+ }
+ 
++/** Description cap for the prompt listing. Long enough to choose, short enough to pay for. */
++const SKILL_DESCRIPTION_PROMPT_CHARS = 180;
++
++function capDescription(description: string): string {
++	const flat = description.replace(/\s+/g, " ").trim();
++	return flat.length <= SKILL_DESCRIPTION_PROMPT_CHARS
++		? flat
++		: `${flat.slice(0, SKILL_DESCRIPTION_PROMPT_CHARS - 1).trimEnd()}…`;
++}
++
+ function escapeXml(str: string): string {
+ 	return str
+ 		.replace(/&/g, "&amp;")
 diff --git a/packages/coding-agent/src/core/system-prompt.ts b/packages/coding-agent/src/core/system-prompt.ts
 index e51e14f..156056d 100644
 --- a/packages/coding-agent/src/core/system-prompt.ts

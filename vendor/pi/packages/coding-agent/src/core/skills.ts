@@ -374,17 +374,27 @@ export function formatSkillsForPrompt(skills: Skill[], fileReadTool: "read" | "b
 		"<available_skills>",
 	];
 
+	// REEF: one line per skill, description capped. The XML form spent five lines and the full
+	// description on every skill: the owner's eight skills came to ~1,250 tokens on every request, and
+	// two descriptions were ~900 characters each. The name, the gist, and the path are what the choice
+	// needs; the file has the rest.
 	for (const skill of visibleSkills) {
-		lines.push("  <skill>");
-		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
-		lines.push("  </skill>");
+		lines.push(`- ${escapeXml(skill.name)}: ${escapeXml(capDescription(skill.description))} (${escapeXml(skill.filePath)})`);
 	}
 
 	lines.push("</available_skills>");
 
 	return lines.join("\n");
+}
+
+/** Description cap for the prompt listing. Long enough to choose, short enough to pay for. */
+const SKILL_DESCRIPTION_PROMPT_CHARS = 180;
+
+function capDescription(description: string): string {
+	const flat = description.replace(/\s+/g, " ").trim();
+	return flat.length <= SKILL_DESCRIPTION_PROMPT_CHARS
+		? flat
+		: `${flat.slice(0, SKILL_DESCRIPTION_PROMPT_CHARS - 1).trimEnd()}…`;
 }
 
 function escapeXml(str: string): string {
