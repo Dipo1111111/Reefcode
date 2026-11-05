@@ -1,0 +1,89 @@
+{
+	"suite": "micro",
+	"note": "Small, checkable tasks. Each answer is graded by predicate, not by a model judge, so the suite is cheap, deterministic, and reproducible. `script: false` disables the script engine to get a direct-tool baseline.",
+	"scenarios": [
+		{
+			"id": "read-field",
+			"task": "What is the value of `project` in config.json? Reply with the value only.",
+			"expect": {
+				"contains": [
+					"atlas"
+				]
+			}
+		},
+		{
+			"id": "count-rules",
+			"task": "How many rules are in the `rules` array in policy.json? Reply with the number only.",
+			"expect": {
+				"contains": [
+					"1"
+				]
+			}
+		},
+		{
+			"id": "find-writer",
+			"task": "Which file defines a function that appends to a session file? Reply with the path only.",
+			"expect": {
+				"contains": [
+					"session-store.js"
+				]
+			}
+		},
+		{
+			"id": "mismatch",
+			"task": "Compare `schemaVersion` in config.json and policy.json. Do they match? Reply yes or no, then the two numbers.",
+			"expect": {
+				"contains": [
+					"3",
+					"2"
+				],
+				"not_contains": [
+					"they match"
+				]
+			}
+		},
+		{
+			"id": "risk-review",
+			"task": "Name the most serious risk in reader.js in one sentence.",
+			"expect": {
+				"regex": [
+					"(path traversal|user.{0,20}path|arbitrary file|untrusted)",
+					"readFileSync|sync|block"
+				]
+			}
+		},
+		{
+			"id": "no-edit",
+			"task": "Read reader.js and report its exported function name. Do not modify any file.",
+			"expect": {
+				"contains": [
+					"read"
+				],
+				"unchanged": [
+					"reader.js"
+				]
+			}
+		},
+		{
+			"id": "multi-file",
+			"task": "List every `.json` file in this directory tree, one path per line, sorted. Then state how many there are.",
+			"expect": {
+				"contains": [
+					"config.json",
+					"policy.json",
+					"2"
+				]
+			}
+		},
+		{
+			"id": "script-batching",
+			"task": "Read config.json and policy.json in a single script call, then report both `schemaVersion` values in one line.",
+			"expect": {
+				"contains": [
+					"3",
+					"2"
+				]
+			}
+		}
+	]
+}

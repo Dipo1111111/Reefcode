@@ -74,6 +74,10 @@ export interface CodemodeToolOptions {
 	sendMessage?: (message: any, options?: { deliverAs?: "steer" | "followUp" | "nextTurn"; triggerTurn?: boolean }) => void;
 	/** How the tool presents the loadout while active (the `codemode.mode` setting). Default: `on`. */
 	getMode?: () => CodemodeMode;
+	/** `script.enabled`; false means declare tools directly instead (ADR-014). */
+	getEnabled?: () => boolean;
+	/** One-line tool listing instead of signature blocks. Default: true. */
+	getCompact?: () => boolean;
 	/** Token budget for tool declarations in the description. Default: {@link DEFAULT_CODEMODE_INLINE_BUDGET}. */
 	getInlineBudget?: () => number | undefined;
 }
@@ -152,7 +156,7 @@ export const CODEMODE_DOCS_PATH = join(getDocsPath(), "codemode.md");
 
 const DESCRIPTION_INTRO = `Run one script that calls several tools. The input is JavaScript (not JSON, no code fence), run as an async function body: top-level \`await\` and \`return\` work. No imports, no file system, no network, no \`fetch\`.
 - \`await tools.<tool>({ ...args })\` calls a tool. It resolves to the tool's output (a string, or an object when the declaration says so) and rejects with an Error when the call fails or is denied.
-- Batch independent calls with \`Promise.allSettled\`; loop when the data decides the next call. Do not write a script for a single call: one direct call costs less.
+- A script earns its turn by doing several calls. Batch independent ones with \`Promise.allSettled\`; loop when the data decides the next call. **A script with one call costs more than calling the tool once** — measured at +40% tokens on small tasks — so do it directly instead.
 - First line, optional: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\` (\`// @script:\` is an alias). \`startInBackground\` continues the script after the tool returns.
 - Long input text (a file body, a patch, a heredoc) goes in an input block instead of inside the code: \`// @input: patch <<'EOF'\` then the text, then a line with only \`EOF\`. Read it as \`inputs.patch\`. Blocks must be closed and are removed before the script runs.`;
 
@@ -199,6 +203,13 @@ export function getCodemodeCallableTools(tools: readonly AgentTool<any>[]): Agen
 }
 
 export interface CodemodeDescriptionOptions {
+	/**
+	 * List each tool as one line — `name(args) → output` — instead of a signature block with prose.
+	 * Measured: the full listing was ~1,030 tokens, about what the four declarations it replaced
+	 * cost, so the whole prompt saving of the script engine disappeared. Prose is still available
+	 * through `await describeTool(name)`, which costs a call only when it is needed.
+	 */
+	compact?: boolean;
 	/** Declare the `models` namespace; only for tools created with model access. */
 	models?: boolean;
 	/** Namespace of each tool, by tool name. Tools of one namespace are listed under one heading. */
@@ -219,6 +230,14 @@ function renderToolSection(declaration: Omit<CodemodeTool, "execute">): string {
 	const id = toCodemodeIdentifier(declaration.name);
 	const heading = id === declaration.name ? `### \`${id}\`` : `### \`${id}\` (\`${declaration.name}\`)`;
 	return `${heading}\n${renderToolSample(declaration).trim()}`;
+}
+
+/** One line: `- read({ path, offset?, limit? }) → string`. */
+function renderCompactSection(declaration: Omit<CodemodeTool, "execute">): string {
+	const id = toCodemodeIdentifier(declaration.name);
+	const args = describeFields(declaration.inputSchema, 0) ?? "{ args }";
+	const output = describeOutput(declaration.name, declaration.outputSchema);
+	return `- \`tools.${id}(${args})\` → ${output}`;
 }
 
 interface CatalogEntry {
@@ -276,7 +295,7 @@ export function createCodemodeDescription(
 		const key = namespace ? `ns:${namespace.name}` : "";
 		const group = groups.get(key) ?? { namespace, entries: [] };
 		groups.set(key, group);
-		const section = renderToolSection(declaration);
+		const section = options.compact ? renderCompactSection(declaration) : renderToolSection(declaration);
 		group.entries.push({ name: declaration.name, section, cost: Math.ceil(section.length / CHARS_PER_TOKEN) });
 	}
 	const ordered = [...groups.values()].sort((a, b) =>
@@ -286,6 +305,17 @@ export function createCodemodeDescription(
 
 	const sections = [DESCRIPTION_INTRO, describeGlobals(options.models === true)];
 	if (declarations.length === 0) return sections.join("\n\n");
+
+	if (options.compact) {
+		// One line per tool: what it is called with, and what it resolves to. No prose, no sample.
+		const lines = ["Nested tools (`await tools.<name>(args)`; `describeTool(name)` for full prose):"];
+		for (const { namespace, entries } of ordered) {
+			if (namespace) lines.push(`## ${namespace.name}`);
+			for (const entry of entries) lines.push(entry.section);
+		}
+		sections.push(lines.join("\n"));
+		return sections.join("\n\n");
+	}
 
 	const toolSections = ["Nested tools:"];
 	for (const { namespace, entries } of ordered) {
@@ -378,7 +408,10 @@ function describeScriptCall(tool: AgentTool<any>): string {
  * Listing by exposure, not by the active set, keeps the codemode description unchanged when
  * `tool_search` loads a tool, so loads do not redeclare codemode.
  */
-function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptions): ToolLoadoutChanges {
+function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptions): ToolLoadoutChanges | undefined {
+	// Script engine off: nothing is hidden and nothing is annotated, so every active tool keeps its
+	// own declaration. This is the direct-tool baseline. (ADR-014, `script.enabled`)
+	if (options.getEnabled?.() === false) return undefined;
 	const mode = options.getMode?.() ?? SETTINGS_DEFAULTS.codemode.mode;
 	const isDirect = (tool: AgentTool) => loadout.getExposure(tool.name) === "direct";
 	const callable = getCodemodeCallableTools(loadout.callable);
@@ -405,6 +438,7 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
 	);
 	const guidelines = new Map(listed.map((tool) => [tool.name, loadout.getPromptGuidelines(tool.name)] as const));
 	descriptions[CODEMODE_TOOL_NAME] = createCodemodeDescription(listed, {
+		compact: options.getCompact?.() ?? true,
 		models: options.models === true,
 		namespaces,
 		guidelines,

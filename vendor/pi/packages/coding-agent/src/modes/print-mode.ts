@@ -37,6 +37,26 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
 	let disposing: Promise<void> | undefined;
+
+	// `reef exec --list-tools`: print the loadout a real run would use, then stop. No model call.
+	if (process.env.REEF_PRINT_LOADOUT === "1") {
+		const session = runtimeHost.session;
+		const facts = session.getHarnessFacts();
+		// Before any request there is no measured budget, so estimate the prompt we would send.
+		const estimated = facts?.promptTokens ?? Math.ceil(session.systemPrompt.length / 3.6);
+		const payload =
+			mode === "json"
+				? JSON.stringify({
+						tools: session.getActiveToolNames(),
+						prompt_tokens: estimated,
+						declared: facts?.declaredTools ?? session.getActiveToolNames().length,
+					})
+				: session.getActiveToolNames().join("\n");
+		process.stdout.write(`${payload}\n`);
+		await runtimeHost.dispose();
+		return 0;
+	}
+
 	// SIGTERM/SIGHUP received so far. Only a repeated signal forces exit during disposal.
 	let signalCount = 0;
 	const signalCleanupHandlers: Array<() => void> = [];

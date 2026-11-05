@@ -1,0 +1,196 @@
+{
+  "suite": "micro",
+  "config": {
+    "script": "on",
+    "tier": "medium",
+    "model": "configured default",
+    "repeat": 1
+  },
+  "passRate": 0,
+  "passed": 0,
+  "total": 8,
+  "tokensPerTask": 0,
+  "requestsPerTask": 0,
+  "costTotal": 0,
+  "failures": [
+    {
+      "id": "read-field",
+      "reason": "missing \"atlas\"",
+      "answer": ""
+    },
+    {
+      "id": "count-rules",
+      "reason": "missing \"1\"",
+      "answer": ""
+    },
+    {
+      "id": "find-writer",
+      "reason": "missing \"session-store.js\"",
+      "answer": ""
+    },
+    {
+      "id": "mismatch",
+      "reason": "missing \"3\"",
+      "answer": ""
+    },
+    {
+      "id": "risk-review",
+      "reason": "no match for /(path traversal|user.{0,20}path|arbitrary file|untrusted)/",
+      "answer": ""
+    },
+    {
+      "id": "no-edit",
+      "reason": "missing \"read\"",
+      "answer": ""
+    },
+    {
+      "id": "multi-file",
+      "reason": "missing \"config.json\"",
+      "answer": ""
+    },
+    {
+      "id": "script-batching",
+      "reason": "missing \"3\"",
+      "answer": ""
+    }
+  ],
+  "runs": [
+    {
+      "id": "read-field",
+      "pass": false,
+      "failure": "missing \"atlas\"",
+      "exitCode": 1,
+      "answer": "",
+      "stderr": "Error: Failed to load extension \"builtin:codemode\": Extension runtime not initialized. Action methods cannot be called during extension loading.\nHint: Start without extensions using \"reef -ne\".",
+      "durationMs": 2592,
+      "parentTokens": 0,
+      "delegatedTokens": 0,
+      "totalTokens": 0,
+      "totalCost": 0,
+      "requests": 0,
+      "delegated": {
+        "tasks": 0
+      }
+    },
+    {
+      "id": "count-rules",
+      "pass": false,
+      "failure": "missing \"1\"",
+      "exitCode": 1,
+      "answer": "",
+      "stderr": "Error: Failed to load extension \"builtin:codemode\": Extension runtime not initialized. Action methods cannot be called during extension loading.\nHint: Start without extensions using \"reef -ne\".",
+      "durationMs": 2723,
+      "parentTokens": 0,
+      "delegatedTokens": 0,
+      "totalTokens": 0,
+      "totalCost": 0,
+      "requests": 0,
+      "delegated": {
+        "tasks": 0
+      }
+    },
+    {
+      "id": "find-writer",
+      "pass": false,
+      "failure": "missing \"session-store.js\"",
+      "exitCode": 1,
+      "answer": "",
+      "stderr": "Error: Failed to load extension \"builtin:codemode\": Extension runtime not initialized. Action methods cannot be called during extension loading.\nHint: Start without extensions using \"reef -ne\".",
+      "durationMs": 2768,
+      "parentTokens": 0,
+      "delegatedTokens": 0,
+      "totalTokens": 0,
+      "totalCost": 0,
+      "requests": 0,
+      "delegated": {
+        "tasks": 0
+      }
+    },
+    {
+      "id": "mismatch",
+      "pass": false,
+      "failure": "missing \"3\"",
+      "exitCode": 1,
+      "answer": "",
+      "stderr": "Error: Failed to load extension \"builtin:codemode\": Extension runtime not initialized. Action methods cannot be called during extension loading.\nHint: Start without extensions using \"reef -ne\".",
+      "durationMs": 2885,
+      "parentTokens": 0,
+      "delegatedTokens": 0,
+      "totalTokens": 0,
+      "totalCost": 0,
+      "requests": 0,
+      "delegated": {
+        "tasks": 0
+      }
+    },
+    {
+      "id": "risk-review",
+      "pass": false,
+      "failure": "no match for /(path traversal|user.{0,20}path|arbitrary file|untrusted)/",
+      "exitCode": 1,
+      "answer": "",
+      "stderr": "Error: Failed to load extension \"builtin:codemode\": Extension runtime not initialized. Action methods cannot be called during extension loading.\nHint: Start without extensions using \"reef -ne\".",
+      "durationMs": 2979,
+      "parentTokens": 0,
+      "delegatedTokens": 0,
+      "totalTokens": 0,
+      "totalCost": 0,
+      "requests": 0,
+      "delegated": {
+        "tasks": 0
+      }
+    },
+    {
+      "id": "no-edit",
+      "pass": false,
+      "failure": "missing \"read\"",
+      "exitCode": 1,
+      "answer": "",
+      "stderr": "Error: Failed to load extension \"builtin:codemode\": Extension runtime not initialized. Action methods cannot be called during extension loading.\nHint: Start without extensions using \"reef -ne\".",
+      "durationMs": 3214,
+      "parentTokens": 0,
+      "delegatedTokens": 0,
+      "totalTokens": 0,
+      "totalCost": 0,
+      "requests": 0,
+      "delegated": {
+        "tasks": 0
+      }
+    },
+    {
+      "id": "multi-file",
+      "pass": false,
+      "failure": "missing \"config.json\"",
+      "exitCode": 1,
+      "answer": "",
+      "stderr": "Error: Failed to load extension \"builtin:codemode\": Extension runtime not initialized. Action methods cannot be called during extension loading.\nHint: Start without extensions using \"reef -ne\".",
+      "durationMs": 3054,
+      "parentTokens": 0,
+      "delegatedTokens": 0,
+      "totalTokens": 0,
+      "totalCost": 0,
+      "requests": 0,
+      "delegated": {
+        "tasks": 0
+      }
+    },
+    {
+      "id": "script-batching",
+      "pass": false,
+      "failure": "missing \"3\"",
+      "exitCode": 1,
+      "answer": "",
+      "stderr": "Error: Failed to load extension \"builtin:codemode\": Extension runtime not initialized. Action methods cannot be called during extension loading.\nHint: Start without extensions using \"reef -ne\".",
+      "durationMs": 2985,
+      "parentTokens": 0,
+      "delegatedTokens": 0,
+      "totalTokens": 0,
+      "totalCost": 0,
+      "requests": 0,
+      "delegated": {
+        "tasks": 0
+      }
+    }
+  ],
+  "generatedAt": "2026-11-05T06:52:45.051Z"
+}

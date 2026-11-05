@@ -285,6 +285,394 @@ index 4bcd28d..de4d159 100644
  
  ${chalk.bold("Built-in Tool Names:")}
    read       - Read file contents
+diff --git a/packages/coding-agent/src/cli/exec-command.ts b/packages/coding-agent/src/cli/exec-command.ts
+new file mode 100644
+index 0000000..2bd5fd4
+--- /dev/null
++++ b/packages/coding-agent/src/cli/exec-command.ts
+@@ -0,0 +1,382 @@
++/**
++ * `reef exec` — the headless contract (docs/10 §3).
++ *
++ * The agent itself already runs headless; what CI and scripts need is a stable *interface* around it:
++ * one prompt in, one object out, and exit codes that mean something without reading stdout. So this
++ * translates flags, runs the normal print mode, and reshapes what comes back.
++ *
++ * `--mode json` already emits one event per line. That is the transport, not the contract: this file
++ * turns it into the documented `json` object, `stream-json` records, and the exit codes 0–5.
++ */
++
++import { spawn } from "node:child_process";
++import { readFileSync, writeFileSync } from "node:fs";
++import { resolve } from "node:path";
++
++/** Exit codes are part of the contract. Do not renumber. */
++export const EXIT = {
++	ok: 0,
++	taskFailed: 1,
++	usage: 2,
++	policyDenied: 3,
++	budgetExceeded: 4,
++	provider: 5,
++} as const;
++
++export interface ExecOptions {
++	prompt?: string;
++	file?: string;
++	model?: string;
++	/** `--auto` tier, or `--read-only`/`--yes` folded in here. */
++	tier?: "none" | "low" | "medium" | "high";
++	readOnly?: boolean;
++	yes?: boolean;
++	output: "text" | "json" | "stream-json";
++	session?: string;
++	fork?: string;
++	cwd?: string;
++	tools?: string;
++	maxTurns?: number;
++	maxCost?: number;
++	jsonSchema?: string;
++	listTools: boolean;
++	trace?: string;
++	continueOnError: boolean;
++}
++
++type Parsed = { options?: ExecOptions; error?: string; help?: boolean };
++
++const TIERS = new Set(["none", "low", "medium", "high"]);
++
++function numberArg(name: string, raw: string | undefined): number | string {
++	if (raw === undefined) return `exec: ${name} needs a value`;
++	const value = Number(raw);
++	if (!Number.isFinite(value) || value < 0) return `exec: ${name} must be a non-negative number`;
++	return value;
++}
++
++/** Parse `reef exec …`. Anything unrecognised is an error, not something to guess at. */
++export function parseExecArgs(args: readonly string[]): Parsed {
++	const options: ExecOptions = { output: "text", listTools: false, continueOnError: false };
++	const positional: string[] = [];
++
++	for (let index = 0; index < args.length; index += 1) {
++		const arg = args[index]!;
++		const next = () => args[++index];
++		if (arg === "--help" || arg === "-h") return { help: true };
++		else if (arg === "-f" || arg === "--file") options.file = next();
++		else if (arg === "-m" || arg === "--model") options.model = next();
++		else if (arg === "--auto") {
++			const value = TIERS.has(args[index + 1] ?? "") ? next() : "medium";
++			options.tier = value as ExecOptions["tier"];
++		} else if (arg === "--yes" || arg === "-y") options.yes = true;
++		else if (arg === "--read-only") options.readOnly = true;
++		else if (arg === "-o" || arg === "--output") {
++			const value = next();
++			if (value !== "text" && value !== "json" && value !== "stream-json") {
++				return { error: `exec: --output must be text, json, or stream-json, not \`${value}\`` };
++			}
++			options.output = value;
++		} else if (arg === "-s" || arg === "--session") options.session = next();
++		else if (arg === "--fork") options.fork = next();
++		else if (arg === "--cwd") options.cwd = next();
++		else if (arg === "--only-tools" || arg === "--add-tools" || arg === "--remove-tools") options.tools = next();
++		else if (arg === "--max-turns") {
++			const value = numberArg("--max-turns", next());
++			if (typeof value === "string") return { error: value };
++			options.maxTurns = value;
++		} else if (arg === "--max-cost") {
++			const value = numberArg("--max-cost", next());
++			if (typeof value === "string") return { error: value };
++			options.maxCost = value;
++		} else if (arg === "--json-schema") options.jsonSchema = next();
++		else if (arg === "--list-tools") options.listTools = true;
++		else if (arg === "--trace") options.trace = next();
++		else if (arg === "--continue-on-error") options.continueOnError = true;
++		else if (arg.startsWith("-") && arg !== "-") return { error: `exec: unknown flag \`${arg}\`` };
++		else positional.push(arg);
++	}
++
++	if (positional.length > 0) options.prompt = positional.join(" ");
++	if (options.prompt && options.file) return { error: "exec: give a prompt or --file, not both" };
++	if (!options.prompt && !options.file && !options.listTools) {
++		return { error: "exec: no prompt. Pass one as an argument, use --file, or read it on stdin." };
++	}
++	if (options.readOnly && options.tier && options.tier !== "none") {
++		return { error: "exec: --read-only and --auto disagree; --read-only forces tier none" };
++	}
++	if (options.readOnly) options.tier = "none";
++	return { options };
++}
++
++/** The flags to give the real CLI. */
++export function toCliArgs(options: ExecOptions, prompt: string): string[] {
++	const args = ["-p", prompt, "--mode", "json"];
++	if (options.model) args.push("--model", options.model);
++	if (options.session) args.push("--session", options.session);
++	if (options.fork) args.push("--fork", options.fork);
++	if (options.tools) args.push("--tools", options.tools);
++	if (options.jsonSchema) args.push("--append-system-prompt", schemaInstruction(options.jsonSchema));
++	// A headless run has no terminal to ask on; the session still has to know whether to proceed.
++	args.push("--no-session");
++	return args;
++}
++
++function schemaInstruction(path: string): string {
++	return `Your final answer must be a single JSON value matching the schema in ${path}, and nothing else.`;
++}
++
++export interface ExecUsage {
++	input: number;
++	output: number;
++	cached: number;
++	cost: number;
++}
++
++export interface ExecResult {
++	status: "ok" | "failed" | "policy_denied" | "budget_exceeded" | "provider_error";
++	session_id?: string;
++	final_message: string;
++	usage: ExecUsage;
++	tools: string[];
++	runs: { tool: string; status: string; duration_ms?: number }[];
++}
++
++/** Fold the event stream into the documented result shape. */
++export function summarizeExec(events: readonly unknown[]): ExecResult {
++	const usage: ExecUsage = { input: 0, output: 0, cached: 0, cost: 0 };
++	const runs: ExecResult["runs"] = [];
++	let finalMessage = "";
++	let sessionId: string | undefined;
++	let providerError = false;
++	let denied = false;
++	const tools = new Set<string>();
++
++	for (const event of events) {
++		const record = event as {
++			type?: string;
++			sessionId?: string;
++			message?: {
++				role?: string;
++				content?: { type?: string; text?: string }[];
++				usage?: { input?: number; output?: number; cacheRead?: number; cost?: { total?: number } };
++			};
++			toolName?: string;
++			isError?: boolean;
++			error?: string;
++			durationMs?: number;
++		};
++		if (record.sessionId) sessionId = record.sessionId;
++		if (record.type === "error" || (record.type === "message_end" && record.error)) providerError = true;
++		if (record.type === "tool_start" && record.toolName) tools.add(record.toolName);
++		if (record.type === "tool_end" && record.toolName) {
++			tools.add(record.toolName);
++			runs.push({
++				tool: record.toolName,
++				status: record.isError ? "error" : "ok",
++				...(record.durationMs === undefined ? {} : { duration_ms: record.durationMs }),
++			});
++		}
++		if (record.type !== "message_end" || record.message?.role !== "assistant") continue;
++		const text = (record.message.content ?? [])
++			.filter((part) => part.type === "text" && typeof part.text === "string")
++			.map((part) => part.text)
++			.join("");
++		if (text.trim()) finalMessage = text;
++		const reported = record.message.usage;
++		if (reported) {
++			usage.input += reported.input ?? 0;
++			usage.output += reported.output ?? 0;
++			usage.cached += reported.cacheRead ?? 0;
++			usage.cost += reported.cost?.total ?? 0;
++		}
++		if (finalMessage.includes("policy_block") || finalMessage.includes("policy_denied")) denied = true;
++	}
++
++	const status: ExecResult["status"] = denied
++		? "policy_denied"
++		: providerError
++			? "provider_error"
++			: finalMessage.trim()
++				? "ok"
++				: "failed";
++	return { status, ...(sessionId ? { session_id: sessionId } : {}), final_message: finalMessage, usage, tools: [...tools], runs };
++}
++
++/** Exit code for a result, which is what CI reads. */
++export function exitCodeFor(result: ExecResult): number {
++	switch (result.status) {
++		case "ok":
++			return EXIT.ok;
++		case "policy_denied":
++			return EXIT.policyDenied;
++		case "provider_error":
++			return EXIT.provider;
++		case "budget_exceeded":
++			return EXIT.budgetExceeded;
++		default:
++			return EXIT.taskFailed;
++	}
++}
++
++const HELP = `reef exec — run one task headless and exit.
++
++  reef exec "fix the failing test in src/auth.test.ts" --auto medium
++  reef exec -f plan.md -o json
++  cat diff.txt | reef exec "summarise this diff"
++
++  -f, --file <path>      read the prompt from a file
++  -m, --model <id>       model or alias
++      --auto [tier]      none|low|medium|high (default medium)
++      --yes              skip ask decisions, keep blocks
++      --read-only        tier none, no writes
++  -o, --output <format>  text | json | stream-json (default text)
++  -s, --session <id>     continue a session
++      --fork <id>        branch a session
++      --cwd <path>       working directory
++      --only-tools <l>   tool allowlist
++      --max-turns <n>    stop after n turns
++      --max-cost <usd>   stop after spending this much
++      --json-schema <f>  the final answer must satisfy this JSON Schema
++      --list-tools       print the effective loadout and exit
++      --trace <path>     write the request audit as JSONL
++      --continue-on-error  do not stop at the first recoverable failure
++
++Exit codes: 0 ok · 1 task failed · 2 bad usage · 3 policy denied · 4 budget exceeded · 5 provider error
++
++The prompt may also arrive on stdin, which is how a diff or a log gets attached without a temp file.
++`;
++
++function readStdin(): Promise<string> {
++	if (process.stdin.isTTY) return Promise.resolve("");
++	return new Promise((resolvePromise) => {
++		let text = "";
++		process.stdin.setEncoding("utf8");
++		process.stdin.on("data", (chunk) => (text += chunk));
++		process.stdin.on("end", () => resolvePromise(text));
++		process.stdin.on("error", () => resolvePromise(text));
++	});
++}
++
++/**
++ * Run one headless task. Returns the exit code instead of exiting, so the caller decides.
++ *
++ * The child is this same program with print mode and JSON events: the interface is the difference,
++ * not the agent. That keeps one code path for tools, policy, sessions, and cost.
++ */
++export async function runExecCommand(args: readonly string[]): Promise<{ handled: boolean; exitCode?: number }> {
++	if (args[0] !== "exec") return { handled: false };
++	const parsed = parseExecArgs(args.slice(1));
++	if (parsed.help) {
++		process.stdout.write(HELP);
++		return { handled: true, exitCode: EXIT.ok };
++	}
++	if (parsed.error) {
++		process.stderr.write(`${parsed.error}\n`);
++		return { handled: true, exitCode: EXIT.usage };
++	}
++	const options = parsed.options!;
++
++	if (options.listTools) {
++		// The loadout is decided by settings, extensions, and flags. Running the agent with a flag
++		// that makes it print and stop is the only way to be sure it matches a real run.
++		process.env.REEF_PRINT_LOADOUT = "1";
++		// The prompt is never sent on this path; print mode prints the loadout and returns.
++		options.prompt = options.prompt ?? "loadout";
++	}
++
++	let prompt = options.prompt ?? "";
++	if (options.file) {
++		try {
++			prompt = readFileSync(resolve(options.file), "utf8");
++		} catch (error) {
++			process.stderr.write(`exec: cannot read --file ${options.file}: ${(error as Error).message}\n`);
++			return { handled: true, exitCode: EXIT.usage };
++		}
++	}
++	if (!prompt && !options.listTools) {
++		const stdin = await readStdin();
++		if (stdin.trim()) prompt = stdin.trim();
++	}
++	if (!prompt && !options.listTools) {
++		process.stderr.write("exec: no prompt. Pass one, use --file, or pipe it on stdin.\n");
++		return { handled: true, exitCode: EXIT.usage };
++	}
++
++	// The safety floor reads these, so `exec` sets them instead of re-implementing the policy.
++	if (options.tier) process.env.REEF_TIER = options.tier;
++	if (options.yes) process.env.REEF_SKIP_APPROVALS = "1";
++	if (options.readOnly) process.env.REEF_READ_ONLY = "1";
++
++	const events: unknown[] = [];
++	const child = spawn(process.execPath, [process.argv[1]!, ...toCliArgs(options, prompt)], {
++		cwd: options.cwd ? resolve(options.cwd) : process.cwd(),
++		stdio: ["ignore", "pipe", "pipe"],
++	});
++
++	let buffer = "";
++	let turns = 0;
++	const streamLine = (line: string) => {
++		if (!line.startsWith("{")) return;
++		let event: unknown;
++		try {
++			event = JSON.parse(line);
++		} catch {
++			return;
++		}
++		events.push(event);
++		if ((event as { type?: string }).type === "turn_start") turns += 1;
++		if (options.maxTurns !== undefined && turns > options.maxTurns) child.kill("SIGTERM");
++		if (options.output === "stream-json") {
++			const record = (event as { type?: string }) ?? {};
++			const mapped =
++				record.type === "tool_start" || record.type === "tool_end" || record.type === "message_end"
++					? event
++					: record.type === "turn_start"
++						? { type: "turn_start" }
++						: undefined;
++			if (mapped) process.stdout.write(`${JSON.stringify(mapped)}\n`);
++		}
++	};
++
++	child.stdout?.on("data", (chunk: Buffer) => {
++		buffer += chunk.toString("utf8");
++		const lines = buffer.split("\n");
++		buffer = lines.pop() ?? "";
++		for (const line of lines) streamLine(line);
++	});
++	const stderr: string[] = [];
++	child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString("utf8")));
++
++	const exitCode = await new Promise<number>((resolvePromise) => child.on("close", (code) => resolvePromise(code ?? 1)));
++	if (buffer.trim()) streamLine(buffer);
++
++	const result = summarizeExec(events);
++	if (options.maxTurns !== undefined && turns > options.maxTurns) result.status = "budget_exceeded";
++	if (options.maxCost !== undefined && result.usage.cost > options.maxCost) result.status = "budget_exceeded";
++	if (options.trace) {
++		try {
++			writeFileSync(resolve(options.trace), `${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
++		} catch (error) {
++			process.stderr.write(`exec: cannot write --trace: ${(error as Error).message}\n`);
++		}
++	}
++
++	if (options.output === "text") {
++		if (result.final_message.trim()) process.stdout.write(`${result.final_message.trim()}\n`);
++		for (const text of stderr) process.stderr.write(text);
++	} else if (options.output === "json") {
++		process.stdout.write(`${JSON.stringify({ ...result, exit_code: exitCodeFor(result) })}\n`);
++	}
++
++	const code = result.status === "ok" && exitCode !== 0 ? EXIT.provider : exitCodeFor(result);
++	if (code !== EXIT.ok && options.output === "text") {
++		for (const text of stderr) if (!text.trim()) continue;
++	}
++	if (code !== EXIT.ok && options.output === "json" && stderr.length) {
++		process.stderr.write(stderr.join(""));
++	}
++	return { handled: true, exitCode: code };
++}
++
++export default runExecCommand;
 diff --git a/packages/coding-agent/src/cli/permissions-command.ts b/packages/coding-agent/src/cli/permissions-command.ts
 new file mode 100644
 index 0000000..f294541
@@ -435,6 +823,279 @@ index 0000000..f294541
 +	}
 +	return { handled: true, exitCode: decision === "block" ? 1 : 0 };
 +}
+diff --git a/packages/coding-agent/src/cli/search-command.test.ts b/packages/coding-agent/src/cli/search-command.test.ts
+new file mode 100644
+index 0000000..698c7ef
+--- /dev/null
++++ b/packages/coding-agent/src/cli/search-command.test.ts
+@@ -0,0 +1,70 @@
++import { describe, expect, it } from "vitest";
++import { formatMatches, searchSessions } from "./search-command.ts";
++
++import { mkdtempSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++function session(lines: unknown[]): string {
++	const dir = mkdtempSync(join(tmpdir(), "reef-search-"));
++	const path = join(dir, "2026-11-05_abc.jsonl");
++	writeFileSync(path, lines.map((line) => JSON.stringify(line)).join("\n"));
++	return dir;
++}
++
++const user = (text: string) => ({ type: "message", message: { role: "user", content: [{ type: "text", text }] } });
++const assistant = (text: string) => ({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
++const toolResult = (text: string) => ({ type: "message", message: { role: "tool", content: [{ type: "text", text }] } });
++
++describe("searchSessions", () => {
++	it("finds a phrase in a user message and quotes it", () => {
++		const dir = session([user("the migration keeps failing on index creation")]);
++		const matches = searchSessions({ query: "migration", dirs: [dir] });
++		expect(matches).toHaveLength(1);
++		expect(matches[0]?.role).toBe("user");
++		expect(matches[0]?.snippet).toContain("migration keeps failing");
++	});
++
++	it("is case-insensitive unless asked otherwise", () => {
++		const dir = session([assistant("ECONNREFUSED")]);
++		expect(searchSessions({ query: "econnrefused", dirs: [dir] })).toHaveLength(1);
++		expect(searchSessions({ query: "econnrefused", dirs: [dir], caseSensitive: true })).toHaveLength(0);
++	});
++
++	it("skips tool results, which are mostly paths", () => {
++		const dir = session([toolResult("src/migration.ts:12")]);
++		expect(searchSessions({ query: "migration", dirs: [dir] })).toHaveLength(0);
++	});
++
++	it("ignores lines that are not JSON", () => {
++		const dir = mkdtempSync(join(tmpdir(), "reef-search-"));
++		writeFileSync(join(dir, "x.jsonl"), 'not json\n{"type":"message","message":{"role":"user","content":"migration"}}\n');
++		expect(searchSessions({ query: "migration", dirs: [dir] })).toHaveLength(1);
++	});
++
++	it("respects the limit", () => {
++		const dir = session([user("hit"), user("hit"), user("hit")]);
++		expect(searchSessions({ query: "hit", dirs: [dir], limit: 2 })).toHaveLength(2);
++	});
++
++	it("filters to one session", () => {
++		const dir = session([user("alpha")]);
++		expect(searchSessions({ query: "alpha", dirs: [dir], session: "nope" })).toHaveLength(0);
++		expect(searchSessions({ query: "alpha", dirs: [dir], session: "2026-11-05" })).toHaveLength(1);
++	});
++
++	it("a missing directory is empty, not a crash", () => {
++		expect(searchSessions({ query: "x", dirs: ["/does/not/exist"] })).toEqual([]);
++	});
++});
++
++describe("formatMatches", () => {
++	it("says so when nothing matched", () => {
++		expect(formatMatches([])).toBe("No matches.");
++	});
++
++	it("puts the session first so a list is scannable", () => {
++		const text = formatMatches([{ session: "s1", path: "/x", role: "user", line: 1, snippet: "hello" }]);
++		expect(text.startsWith("s1")).toBe(true);
++	});
++});
+diff --git a/packages/coding-agent/src/cli/search-command.ts b/packages/coding-agent/src/cli/search-command.ts
+new file mode 100644
+index 0000000..d037750
+--- /dev/null
++++ b/packages/coding-agent/src/cli/search-command.ts
+@@ -0,0 +1,191 @@
++/**
++ * `reef search "term"` — find something you said or the agent read, across sessions.
++ *
++ * Session files are JSONL, so this is a scan, not an index. That is the right trade at this size:
++ * fifty sessions are a few megabytes, and an index would be a second thing to keep consistent.
++ *
++ * It searches the text a human would remember: user and assistant messages, and tool output. It
++ * does not search tool arguments, which are mostly paths and would drown the matches.
++ */
++
++import { existsSync, readFileSync, readdirSync } from "node:fs";
++import { join } from "node:path";
++
++export interface SearchMatch {
++	session: string;
++	path: string;
++	role: string;
++	line: number;
++	snippet: string;
++}
++
++export interface SearchOptions {
++	query: string;
++	dirs: string[];
++	/** Case-sensitive when true. Default: false, because people search from memory. */
++	caseSensitive?: boolean;
++	limit?: number;
++	/** Filter to one session id or file name. */
++	session?: string;
++}
++
++const SNIPPET_RADIUS = 90;
++
++function snippetAround(text: string, query: string, caseSensitive: boolean): string | undefined {
++	const haystack = caseSensitive ? text : text.toLowerCase();
++	const needle = caseSensitive ? query : query.toLowerCase();
++	const at = haystack.indexOf(needle);
++	if (at < 0) return undefined;
++	const start = Math.max(0, at - SNIPPET_RADIUS);
++	const end = Math.min(text.length, at + query.length + SNIPPET_RADIUS);
++	const body = text.slice(start, end).replace(/\s+/g, " ").trim();
++	return `${start > 0 ? "…" : ""}${body}${end < text.length ? "…" : ""}`;
++}
++
++function collectSessions(dirs: readonly string[]): string[] {
++	const files: string[] = [];
++	for (const dir of dirs) {
++		if (!existsSync(dir)) continue;
++		for (const name of readdirSync(dir)) {
++			if (name.endsWith(".jsonl")) files.push(join(dir, name));
++		}
++	}
++	return files.sort();
++}
++
++/** Text of an entry, or undefined when it has no human-readable content. */
++function textOf(entry: unknown): { role: string; text: string } | undefined {
++	const record = entry as { type?: string; message?: { role?: string; content?: unknown }; data?: unknown };
++	if (record.type !== "message" || !record.message) return undefined;
++	const role = record.message.role ?? "unknown";
++	if (role !== "user" && role !== "assistant") return undefined;
++	const content = record.message.content;
++	if (typeof content === "string") return { role, text: content };
++	if (!Array.isArray(content)) return undefined;
++	const text = content
++		.map((part) => {
++			const candidate = part as { type?: string; text?: string };
++			return candidate.type === "text" && typeof candidate.text === "string" ? candidate.text : "";
++		})
++		.join("\n");
++	return text.trim() ? { role, text } : undefined;
++}
++
++export function searchSessions(options: SearchOptions): SearchMatch[] {
++	const caseSensitive = options.caseSensitive === true;
++	const limit = options.limit ?? 50;
++	const matches: SearchMatch[] = [];
++
++	for (const path of collectSessions(options.dirs)) {
++		if (options.session && !path.includes(options.session)) continue;
++		let raw: string;
++		try {
++			raw = readFileSync(path, "utf8");
++		} catch {
++			continue;
++		}
++		const session = path.split("/").pop()?.replace(/\.jsonl$/, "") ?? path;
++		const lines = raw.split("\n");
++		for (let index = 0; index < lines.length; index += 1) {
++			const line = lines[index]!;
++			if (!line.trim().startsWith("{")) continue;
++			// Cheap rejection before parsing: most lines do not contain the query at all.
++			const probe = caseSensitive ? line : line.toLowerCase();
++			if (!probe.includes(caseSensitive ? options.query : options.query.toLowerCase())) continue;
++			let entry: unknown;
++			try {
++				entry = JSON.parse(line);
++			} catch {
++				continue;
++			}
++			const text = textOf(entry);
++			if (!text) continue;
++			const snippet = snippetAround(text.text, options.query, caseSensitive);
++			if (!snippet) continue;
++			matches.push({ session, path, role: text.role, line: index + 1, snippet });
++			if (matches.length >= limit) return matches;
++		}
++	}
++	return matches;
++}
++
++export function formatMatches(matches: readonly SearchMatch[]): string {
++	if (matches.length === 0) return "No matches.";
++	return matches.map((match) => `${match.session}  ${match.role.padEnd(9)} ${match.snippet}`).join("\n");
++}
++
++const HELP = `reef search — find text across this project's sessions.
++
++  reef search "migration"
++  reef search "ECONNREFUSED" --session 2026-11-05
++  reef search "policy_block" --json --limit 10
++
++  --session <id>   only this session
++  --limit <n>      stop after n matches (default 50)
++  --case           match case exactly
++  --json           one JSON object per match
++  --dir <path>     an extra session directory to scan
++
++Exit codes: 0 matches found · 1 none · 2 bad usage
++`;
++
++export interface SearchCommandResult {
++	handled: boolean;
++	exitCode?: number;
++}
++
++/** `reef search …`, reading sessions from the project and the agent directory. */
++export function runSearchCommand(args: readonly string[]): SearchCommandResult {
++	if (args[0] !== "search") return { handled: false };
++	const argv = args.slice(1);
++	const query: string[] = [];
++	const dirs: string[] = [];
++	let session: string | undefined;
++	let limit = 50;
++	let caseSensitive = false;
++	let json = false;
++
++	for (let index = 0; index < argv.length; index += 1) {
++		const arg = argv[index]!;
++		if (arg === "--help" || arg === "-h") {
++			process.stdout.write(HELP);
++			return { handled: true, exitCode: 0 };
++		}
++		if (arg === "--session") session = argv[++index];
++		else if (arg === "--dir") {
++			const dir = argv[++index];
++			if (dir) dirs.push(dir);
++		} else if (arg === "--limit") {
++			const value = Number(argv[++index]);
++			if (!Number.isFinite(value) || value <= 0) {
++				process.stderr.write("search: --limit must be a positive number\n");
++				return { handled: true, exitCode: 2 };
++			}
++			limit = value;
++		} else if (arg === "--case") caseSensitive = true;
++		else if (arg === "--json") json = true;
++		else if (arg.startsWith("-")) {
++			process.stderr.write(`search: unknown flag \`${arg}\`\n`);
++			return { handled: true, exitCode: 2 };
++		} else query.push(arg);
++	}
++
++	if (query.length === 0) {
++		process.stderr.write("search: give something to search for\n");
++		return { handled: true, exitCode: 2 };
++	}
++
++	const searchDirs = [join(process.cwd(), ".reef", "sessions"), ...dirs];
++	const agentDir = process.env.REEF_AGENT_DIR ?? join(process.env.HOME ?? "", ".reef", "agent");
++	searchDirs.push(join(agentDir, "sessions"));
++
++	const matches = searchSessions({ query: query.join(" "), dirs: searchDirs, limit, caseSensitive, session });
++	if (json) {
++		for (const match of matches) process.stdout.write(`${JSON.stringify(match)}\n`);
++	} else {
++		process.stdout.write(`${formatMatches(matches)}\n`);
++	}
++	return { handled: true, exitCode: matches.length > 0 ? 0 : 1 };
++}
++
++export default runSearchCommand;
 diff --git a/packages/coding-agent/src/cli/setup.ts b/packages/coding-agent/src/cli/setup.ts
 index 8ddf34a..8ff5895 100644
 --- a/packages/coding-agent/src/cli/setup.ts
@@ -507,7 +1168,7 @@ index 5a9552d..2ac0a85 100644
  }
  
 diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
-index a0dda03..9ccd119 100644
+index a0dda03..0c981df 100644
 --- a/packages/coding-agent/src/core/agent-session.ts
 +++ b/packages/coding-agent/src/core/agent-session.ts
 @@ -80,6 +80,14 @@ import {
@@ -525,7 +1186,7 @@ index a0dda03..9ccd119 100644
  import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
  import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
  import {
-@@ -496,6 +504,30 @@ export class AgentSession {
+@@ -496,6 +504,45 @@ export class AgentSession {
  	private _toolPromptGuidelines: Map<string, string[]> = new Map();
  
  	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
@@ -533,6 +1194,21 @@ index a0dda03..9ccd119 100644
 +	private readonly _requestAuditor = new RequestAuditor();
 +	private _lastBudget: BudgetResult | undefined;
 +	private _lastAudit: RequestAudit | undefined;
++
++	/**
++	 * What the TUI footer shows about the harness itself: the declared surface and what it costs.
++	 * Undefined before the first request, which is honest — there is nothing measured yet.
++	 */
++	getHarnessFacts(): { declaredTools: number; promptTokens: number; requestCount: number } | undefined {
++		const budget = this._lastBudget;
++		if (!budget) return undefined;
++		return {
++			declaredTools: this.agent.state.tools.length,
++			// The whole request: sections, plus what the tool block costs, measured on the last one.
++			promptTokens: this._lastAudit?.tokens ?? budget.tokens,
++			requestCount: this._requestAuditor.history.length,
++		};
++	}
 +	/** A cache break that is expected to happen on the next request, and why. */
 +	private _pendingCacheBreak: CacheBreak | undefined;
 +
@@ -556,7 +1232,7 @@ index a0dda03..9ccd119 100644
  	/** Prompt options after before_agent_start mutations for the active run. */
  	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
  
-@@ -935,6 +967,9 @@ export class AgentSession {
+@@ -935,6 +982,9 @@ export class AgentSession {
  			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
  			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
  			this._runSystemPromptOptions = options;
@@ -566,7 +1242,7 @@ index a0dda03..9ccd119 100644
  
  			return {
  				...previousSnapshot,
-@@ -1604,9 +1639,17 @@ export class AgentSession {
+@@ -1604,9 +1654,17 @@ export class AgentSession {
  	 * `codemode` or `deferred` tool.
  	 */
  	private _getCallableTools(active: ReadonlySet<string> = new Set(this.getActiveToolNames())): AgentTool[] {
@@ -585,7 +1261,7 @@ index a0dda03..9ccd119 100644
  		});
  	}
  
-@@ -1664,7 +1707,9 @@ export class AgentSession {
+@@ -1664,7 +1722,9 @@ export class AgentSession {
  			});
  		}
  		this._hiddenDeclarations = hidden;
@@ -596,7 +1272,7 @@ index a0dda03..9ccd119 100644
  		return declared;
  	}
  
-@@ -1791,10 +1836,9 @@ export class AgentSession {
+@@ -1791,10 +1851,9 @@ export class AgentSession {
  		options.selectedTools = this._applyToolLoadout(options.selectedTools).map((tool) => tool.name);
  		// The tool list and rules must match the declarations the request carries.
  		options.hiddenTools = [...this._hiddenDeclarations];
@@ -610,7 +1286,7 @@ index a0dda03..9ccd119 100644
  		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
  	}
  
-@@ -2002,6 +2046,8 @@ export class AgentSession {
+@@ -2002,6 +2061,8 @@ export class AgentSession {
  		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
  		this._runSystemPromptOptions = result.systemPromptOptions;
  		if (updateMessage) messages.unshift(updateMessage);
@@ -619,7 +1295,7 @@ index a0dda03..9ccd119 100644
  		return messages;
  	}
  
-@@ -2887,9 +2933,44 @@ export class AgentSession {
+@@ -2887,9 +2948,44 @@ export class AgentSession {
  	 *
  	 * @param customInstructions Optional instructions for the compaction summary
  	 */
@@ -664,7 +1340,7 @@ index a0dda03..9ccd119 100644
  		this._emit({ type: "compaction_start", reason: "manual" });
  		let fromExtension = false;
  		let cancelledByExtension = false;
-@@ -3586,6 +3667,8 @@ export class AgentSession {
+@@ -3586,6 +3682,8 @@ export class AgentSession {
  				},
  				getSystemPrompt: () => this.systemPrompt,
  				getSystemPromptOptions: () => this._baseSystemPromptOptions,
@@ -1306,13 +1982,16 @@ index 0000000..1734c02
 +	return `request ${audit.request} · ${audit.tokens} tok · cache ${audit.cacheablePrefixTokens} tok · ${state}`;
 +}
 diff --git a/packages/coding-agent/src/core/settings-defaults.ts b/packages/coding-agent/src/core/settings-defaults.ts
-index 1f90280..d80723a 100644
+index 1f90280..06c260d 100644
 --- a/packages/coding-agent/src/core/settings-defaults.ts
 +++ b/packages/coding-agent/src/core/settings-defaults.ts
-@@ -58,6 +58,10 @@ export const SETTINGS_DEFAULTS = {
+@@ -58,6 +58,13 @@ export const SETTINGS_DEFAULTS = {
  		mode: "on",
  		inlineBudget: 3000,
  	},
++	script: {
++		enabled: true,
++	},
 +	safety: {
 +		tier: "medium",
 +		skipApprovals: false,
@@ -1343,10 +2022,30 @@ index 99bbead..17fd8df 100644
  
  	setShowHardwareCursor(enabled: boolean): void {
 diff --git a/packages/coding-agent/src/core/settings-schema.ts b/packages/coding-agent/src/core/settings-schema.ts
-index 1ef7973..1f9c5f0 100644
+index 1ef7973..c0345e9 100644
 --- a/packages/coding-agent/src/core/settings-schema.ts
 +++ b/packages/coding-agent/src/core/settings-schema.ts
-@@ -168,6 +168,22 @@ const CodemodeSettingsSchema = Type.Object({
+@@ -151,6 +151,19 @@ function codemodeMode(options?: TSchemaOptions) {
+ 
+ const CodemodeModeSchema = codemodeMode();
+ 
++/**
++ * The one escape hatch (ADR-014). There is no per-model tuning: if the script engine ever makes a
++ * model worse, turning it off is the supported answer, and it is global rather than per model.
++ */
++const ScriptSettingsSchema = Type.Object({
++	enabled: Type.Optional(
++		Type.Boolean({
++			description: "Declare script and wait_for_script to the model. When false, tools are declared directly.",
++			default: SETTINGS_DEFAULTS.script.enabled,
++		}),
++	),
++});
++
+ const CodemodeSettingsSchema = Type.Object({
+ 	mode: Type.Optional(
+ 		codemodeMode({
+@@ -168,6 +181,22 @@ const CodemodeSettingsSchema = Type.Object({
  	),
  });
  
@@ -1369,7 +2068,7 @@ index 1ef7973..1f9c5f0 100644
  const PackageSourceSchema = Type.Union(
  	[
  		Type.String({ description: "Load all resources from the package." }),
-@@ -287,7 +303,7 @@ export const SettingsSchema = Type.Object(
+@@ -287,7 +316,7 @@ export const SettingsSchema = Type.Object(
  			Type.Array(Type.String(), {
  				minItems: 1,
  				description:
@@ -1378,14 +2077,23 @@ index 1ef7973..1f9c5f0 100644
  			}),
  		),
  		collapseChangelog: Type.Optional(
-@@ -398,6 +414,7 @@ export const SettingsSchema = Type.Object(
+@@ -398,6 +427,8 @@ export const SettingsSchema = Type.Object(
  		markdown: Type.Optional(MarkdownSettingsSchema),
  		warnings: Type.Optional(WarningSettingsSchema),
  		codemode: Type.Optional(CodemodeSettingsSchema),
++		script: Type.Optional(ScriptSettingsSchema),
 +		safety: Type.Optional(SafetySettingsSchema),
  		sessionDir: Type.Optional(
  			Type.String({
  				description: "Custom session storage directory, in the same format as the --session-dir CLI flag.",
+@@ -480,6 +511,7 @@ export interface MarkdownSettings extends Static<typeof MarkdownSettingsSchema>
+ export interface WarningSettings extends Static<typeof WarningSettingsSchema> {}
+ export type CodemodeMode = Static<typeof CodemodeModeSchema>;
+ export interface CodemodeSettings extends Static<typeof CodemodeSettingsSchema> {}
++export interface ScriptSettings extends Static<typeof ScriptSettingsSchema> {}
+ export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust"]>;
+ export type QuietStartup = NonNullable<SettingsInput["quietStartup"]>;
+ export type TransportSetting = NonNullable<SettingsInput["transport"]>;
 diff --git a/packages/coding-agent/src/core/system-prompt.ts b/packages/coding-agent/src/core/system-prompt.ts
 index e51e14f..225df1b 100644
 --- a/packages/coding-agent/src/core/system-prompt.ts
@@ -1620,6 +2328,80 @@ index 8fb93a6..de1a344 100644
  								// Apply truncation, respecting both line and byte limits.
  								const truncation = truncateHead(selectedContent);
  								let outputText: string;
+diff --git a/packages/coding-agent/src/extensions/codemode/description.test.ts b/packages/coding-agent/src/extensions/codemode/description.test.ts
+new file mode 100644
+index 0000000..e61b14a
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/codemode/description.test.ts
+@@ -0,0 +1,68 @@
++import { describe, expect, it } from "vitest";
++import { createCodemodeDescription } from "./tool.ts";
++
++/** A tool as the description builder sees it: name, prose, params, output shape. */
++function tool(name: string, description: string, params: Record<string, unknown>, output: unknown = { type: "string" }) {
++	return {
++		name,
++		description,
++		parameters: { type: "object", properties: params, required: Object.keys(params).slice(0, 1) },
++		outputSchema: output,
++	} as never;
++}
++
++const tools = [
++	tool("read", "Read a file from the workspace and return its text with line numbers.", {
++		path: { type: "string" },
++		offset: { type: "number" },
++		limit: { type: "number" },
++	}),
++	tool("bash", "Run a shell command and return its output, with a durable artifact when truncated.", {
++		command: { type: "string" },
++		timeout: { type: "number" },
++	}),
++	tool("edit", "Replace an exact block of text in a file.", { path: { type: "string" }, old: { type: "string" }, new: { type: "string" } }),
++	tool("write", "Write a whole file, creating parent directories.", { path: { type: "string" }, content: { type: "string" } }),
++	tool("grep", "Search file contents by pattern and return matching lines.", { pattern: { type: "string" }, path: { type: "string" } }),
++	tool("find", "Find files by glob and return their paths.", { glob: { type: "string" } }),
++	tool("ls", "List the entries of a directory.", { path: { type: "string" } }),
++	tool("task", "Delegate a self-contained job to a subagent and return its report.", {
++		prompt: { type: "string" },
++		subagent_type: { type: "string" },
++		context: { type: "string" },
++	}),
++];
++
++const estimate = (text: string) => Math.ceil(text.length / 4);
++
++describe("codemode description", () => {
++	it("compact lists every tool on one line with its arguments and return", () => {
++		const text = createCodemodeDescription(tools, { compact: true });
++		for (const name of ["read", "bash", "edit", "write", "grep", "find", "ls", "task"]) expect(text).toContain(name);
++		expect(text).toContain("tools.read({ path, offset?, limit? })");
++		expect(text).toContain("→ a string");
++	});
++
++	it("compact drops the prose but keeps the shape", () => {
++		const compact = estimate(createCodemodeDescription(tools, { compact: true }));
++		const full = estimate(createCodemodeDescription(tools, {}));
++		const text = createCodemodeDescription(tools, { compact: true });
++		// The invariant: no tool prose in the listing, because that is the expensive part and it is
++		// still reachable through `describeTool(name)`.
++		expect(text).not.toContain("Read a file from the workspace");
++		expect(compact).toBeLessThan(full);
++		// Real tools carry longer descriptions than these fixtures; the live measurement after this
++		// change is what confirms the size, not this assertion.
++		expect(compact).toBeLessThan(620);
++	});
++
++	it("compact keeps the batching rule, because that is what makes a script worth a turn", () => {
++		const text = createCodemodeDescription(tools, { compact: true });
++		expect(text).toContain("A script earns its turn by doing several calls");
++		expect(text).toContain("costs more than calling the tool once");
++	});
++
++	it("says where the prose went", () => {
++		expect(createCodemodeDescription(tools, { compact: true })).toContain("describeTool(name)");
++	});
++});
 diff --git a/packages/coding-agent/src/extensions/codemode/execute.ts b/packages/coding-agent/src/extensions/codemode/execute.ts
 index b363599..a9e2b0a 100644
 --- a/packages/coding-agent/src/extensions/codemode/execute.ts
@@ -1694,7 +2476,7 @@ index b363599..a9e2b0a 100644
  	if (truncated.fullOutputPath) details.fullOutputPath = truncated.fullOutputPath;
  	return {
 diff --git a/packages/coding-agent/src/extensions/codemode/index.ts b/packages/coding-agent/src/extensions/codemode/index.ts
-index 67492b6..3ebc8c1 100644
+index 67492b6..2936143 100644
 --- a/packages/coding-agent/src/extensions/codemode/index.ts
 +++ b/packages/coding-agent/src/extensions/codemode/index.ts
 @@ -10,6 +10,8 @@ import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types
@@ -1706,10 +2488,45 @@ index 67492b6..3ebc8c1 100644
  
  export interface CodemodeExtensionOptions {
  	/** Overrides the `codemode.mode` setting. */
-@@ -31,9 +33,20 @@ function readInlineBudget(pi: ExtensionAPI): number | undefined {
+@@ -24,6 +26,33 @@ function readMode(pi: ExtensionAPI): CodemodeMode {
+ 	return pi.getSettings().codemode?.mode === "only" ? "only" : SETTINGS_DEFAULTS.codemode.mode;
+ }
+ 
++/**
++ * `script.enabled` (ADR-014) or `REEF_SCRIPT=off`. When off, the script tools are not declared and
++ * every tool is declared directly, which is the direct-tool baseline the evals measure against.
++ */
++function readEnvEnabled(): boolean | undefined {
++	const env = process.env.REEF_SCRIPT?.trim().toLowerCase();
++	if (env === undefined || env === "") return undefined;
++	return !(env === "off" || env === "false" || env === "0");
++}
++
++/**
++ * Settings are not readable while extensions load, so this is asked again once the session starts.
++ * Before that, the environment decides; the default is on.
++ */
++function readEnabled(pi: ExtensionAPI): boolean {
++	const fromEnv = readEnvEnabled();
++	if (fromEnv !== undefined) return fromEnv;
++	try {
++		return pi.getSettings().script?.enabled !== false;
++	} catch {
++		return true;
++	}
++}
++
++/** Direct tools declared instead of `script` when the engine is off. */
++const DIRECT_TOOLS = ["read", "bash", "edit", "write"];
++
+ function readInlineBudget(pi: ExtensionAPI): number | undefined {
+ 	const budget = pi.getSettings().codemode?.inlineBudget;
+ 	return typeof budget === "number" && Number.isFinite(budget) && budget >= 0 ? budget : undefined;
+@@ -31,17 +60,43 @@ function readInlineBudget(pi: ExtensionAPI): number | undefined {
  
  export function createCodemodeExtension(options: CodemodeExtensionOptions = {}): ExtensionFactory {
  	return (pi) => {
++		const enabled = readEnabled(pi);
 +		// A job that was running when the process ended can never finish. Say so once per session
 +		// start instead of leaving a row that looks alive forever.
 +		pi.on("session_start", async (event) => {
@@ -1720,6 +2537,14 @@ index 67492b6..3ebc8c1 100644
 +			return undefined;
 +		});
 +
++		pi.on("session_start", async () => {
++			if (readEnabled(pi)) return undefined;
++			// Engine off: show the tools themselves. `script` is left registered but undeclared, so
++			// `--tools script` still works and nothing changes for a session that asks for it.
++			pi.setActiveTools([...new Set([...pi.getActiveTools().filter((name) => name !== "script" && name !== "wait_for_script"), ...DIRECT_TOOLS])]);
++			return undefined;
++		});
++
  		pi.registerTool({
  			...createCodemodeToolDefinition({
  				appendEntry: (customType, data) => pi.appendEntry(customType, data),
@@ -1727,17 +2552,18 @@ index 67492b6..3ebc8c1 100644
  				models: options.models ?? true,
  				getToolNamespace: (name) => pi.getAllTools().find((tool) => tool.name === name)?.namespace,
  				getToolGuidelines: () =>
-@@ -41,7 +54,12 @@ export function createCodemodeExtension(options: CodemodeExtensionOptions = {}):
+ 					new Map(pi.getAllTools().map((tool) => [tool.name, tool.promptGuidelines ?? []] as const)),
  				getMode: () => options.mode ?? readMode(pi),
  				getInlineBudget: () => options.inlineBudget ?? readInlineBudget(pi),
++				getEnabled: () => enabled,
  			}),
 -			defaultActive: false,
-+			defaultActive: true,
++			defaultActive: enabled,
 +		});
 +		// `wait_for_script` is the declared partner of `script` and ships with it.
 +		pi.registerTool({
 +			...createWaitForScriptToolDefinition(),
-+			defaultActive: true,
++			defaultActive: enabled,
  		});
  	};
  }
@@ -1882,7 +2708,7 @@ index 0000000..f739dd6
 +	return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 +}
 diff --git a/packages/coding-agent/src/extensions/codemode/tool.ts b/packages/coding-agent/src/extensions/codemode/tool.ts
-index 648ba61..1e87da1 100644
+index 648ba61..8088625 100644
 --- a/packages/coding-agent/src/extensions/codemode/tool.ts
 +++ b/packages/coding-agent/src/extensions/codemode/tool.ts
 @@ -33,10 +33,13 @@ import type { ModelRegistry } from "../../core/model-registry.ts";
@@ -1900,7 +2726,7 @@ index 648ba61..1e87da1 100644
  
  /** Custom entry type holding one script's `store()` writes: {@link CodemodeStoreEntryData}. */
  export const CODEMODE_STORE_ENTRY_TYPE = "codemode-store";
-@@ -66,7 +69,9 @@ export interface CodemodeToolOptions {
+@@ -66,9 +69,15 @@ export interface CodemodeToolOptions {
  	 * Persists `store()` writes as a session custom entry. Without it, writes last only for the
  	 * current script; `load()` still reads entries already on the branch.
  	 */
@@ -1910,8 +2736,14 @@ index 648ba61..1e87da1 100644
 +	sendMessage?: (message: any, options?: { deliverAs?: "steer" | "followUp" | "nextTurn"; triggerTurn?: boolean }) => void;
  	/** How the tool presents the loadout while active (the `codemode.mode` setting). Default: `on`. */
  	getMode?: () => CodemodeMode;
++	/** `script.enabled`; false means declare tools directly instead (ADR-014). */
++	getEnabled?: () => boolean;
++	/** One-line tool listing instead of signature blocks. Default: true. */
++	getCompact?: () => boolean;
  	/** Token budget for tool declarations in the description. Default: {@link DEFAULT_CODEMODE_INLINE_BUDGET}. */
-@@ -76,8 +81,9 @@ export interface CodemodeToolOptions {
+ 	getInlineBudget?: () => number | undefined;
+ }
+@@ -76,8 +85,9 @@ export interface CodemodeToolOptions {
  const TEXT_OUTPUT_SCHEMA: CodemodeJsonSchema = { type: "string" };
  
  export const codemodeSchema = Type.Object({
@@ -1923,7 +2755,7 @@ index 648ba61..1e87da1 100644
  	}),
  });
  
-@@ -105,26 +111,58 @@ export interface CodemodeToolDetails {
+@@ -105,26 +115,58 @@ export interface CodemodeToolDetails {
  	fullOutputPath?: string;
  }
  
@@ -1973,7 +2805,7 @@ index 648ba61..1e87da1 100644
 -- Optional first line: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\``;
 +const DESCRIPTION_INTRO = `Run one script that calls several tools. The input is JavaScript (not JSON, no code fence), run as an async function body: top-level \`await\` and \`return\` work. No imports, no file system, no network, no \`fetch\`.
 +- \`await tools.<tool>({ ...args })\` calls a tool. It resolves to the tool's output (a string, or an object when the declaration says so) and rejects with an Error when the call fails or is denied.
-+- Batch independent calls with \`Promise.allSettled\`; loop when the data decides the next call. Do not write a script for a single call: one direct call costs less.
++- A script earns its turn by doing several calls. Batch independent ones with \`Promise.allSettled\`; loop when the data decides the next call. **A script with one call costs more than calling the tool once** — measured at +40% tokens on small tasks — so do it directly instead.
 +- First line, optional: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\` (\`// @script:\` is an alias). \`startInBackground\` continues the script after the tool returns.
 +- Long input text (a file body, a patch, a heredoc) goes in an input block instead of inside the code: \`// @input: patch <<'EOF'\` then the text, then a line with only \`EOF\`. Read it as \`inputs.patch\`. Blocks must be closed and are removed before the script runs.`;
  
@@ -1988,7 +2820,75 @@ index 648ba61..1e87da1 100644
  		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
  	];
  	if (models) {
-@@ -351,7 +389,14 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+@@ -161,6 +203,13 @@ export function getCodemodeCallableTools(tools: readonly AgentTool<any>[]): Agen
+ }
+ 
+ export interface CodemodeDescriptionOptions {
++	/**
++	 * List each tool as one line — `name(args) → output` — instead of a signature block with prose.
++	 * Measured: the full listing was ~1,030 tokens, about what the four declarations it replaced
++	 * cost, so the whole prompt saving of the script engine disappeared. Prose is still available
++	 * through `await describeTool(name)`, which costs a call only when it is needed.
++	 */
++	compact?: boolean;
+ 	/** Declare the `models` namespace; only for tools created with model access. */
+ 	models?: boolean;
+ 	/** Namespace of each tool, by tool name. Tools of one namespace are listed under one heading. */
+@@ -183,6 +232,14 @@ function renderToolSection(declaration: Omit<CodemodeTool, "execute">): string {
+ 	return `${heading}\n${renderToolSample(declaration).trim()}`;
+ }
+ 
++/** One line: `- read({ path, offset?, limit? }) → string`. */
++function renderCompactSection(declaration: Omit<CodemodeTool, "execute">): string {
++	const id = toCodemodeIdentifier(declaration.name);
++	const args = describeFields(declaration.inputSchema, 0) ?? "{ args }";
++	const output = describeOutput(declaration.name, declaration.outputSchema);
++	return `- \`tools.${id}(${args})\` → ${output}`;
++}
++
+ interface CatalogEntry {
+ 	name: string;
+ 	section: string;
+@@ -238,7 +295,7 @@ export function createCodemodeDescription(
+ 		const key = namespace ? `ns:${namespace.name}` : "";
+ 		const group = groups.get(key) ?? { namespace, entries: [] };
+ 		groups.set(key, group);
+-		const section = renderToolSection(declaration);
++		const section = options.compact ? renderCompactSection(declaration) : renderToolSection(declaration);
+ 		group.entries.push({ name: declaration.name, section, cost: Math.ceil(section.length / CHARS_PER_TOKEN) });
+ 	}
+ 	const ordered = [...groups.values()].sort((a, b) =>
+@@ -249,6 +306,17 @@ export function createCodemodeDescription(
+ 	const sections = [DESCRIPTION_INTRO, describeGlobals(options.models === true)];
+ 	if (declarations.length === 0) return sections.join("\n\n");
+ 
++	if (options.compact) {
++		// One line per tool: what it is called with, and what it resolves to. No prose, no sample.
++		const lines = ["Nested tools (`await tools.<name>(args)`; `describeTool(name)` for full prose):"];
++		for (const { namespace, entries } of ordered) {
++			if (namespace) lines.push(`## ${namespace.name}`);
++			for (const entry of entries) lines.push(entry.section);
++		}
++		sections.push(lines.join("\n"));
++		return sections.join("\n\n");
++	}
++
+ 	const toolSections = ["Nested tools:"];
+ 	for (const { namespace, entries } of ordered) {
+ 		const visible = entries.filter((entry) => shown.has(entry.name));
+@@ -340,7 +408,10 @@ function describeScriptCall(tool: AgentTool<any>): string {
+  * Listing by exposure, not by the active set, keeps the codemode description unchanged when
+  * `tool_search` loads a tool, so loads do not redeclare codemode.
+  */
+-function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptions): ToolLoadoutChanges {
++function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptions): ToolLoadoutChanges | undefined {
++	// Script engine off: nothing is hidden and nothing is annotated, so every active tool keeps its
++	// own declaration. This is the direct-tool baseline. (ADR-014, `script.enabled`)
++	if (options.getEnabled?.() === false) return undefined;
+ 	const mode = options.getMode?.() ?? SETTINGS_DEFAULTS.codemode.mode;
+ 	const isDirect = (tool: AgentTool) => loadout.getExposure(tool.name) === "direct";
+ 	const callable = getCodemodeCallableTools(loadout.callable);
+@@ -351,7 +422,14 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
  			if (callableNames.has(tool.name)) descriptions[tool.name] = describeScriptCall(tool);
  		}
  	}
@@ -2004,7 +2904,15 @@ index 648ba61..1e87da1 100644
  	const namespaces = new Map(
  		listed.flatMap((tool) => {
  			const namespace = loadout.getNamespace(tool.name);
-@@ -369,13 +414,21 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+@@ -360,6 +438,7 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+ 	);
+ 	const guidelines = new Map(listed.map((tool) => [tool.name, loadout.getPromptGuidelines(tool.name)] as const));
+ 	descriptions[CODEMODE_TOOL_NAME] = createCodemodeDescription(listed, {
++		compact: options.getCompact?.() ?? true,
+ 		models: options.models === true,
+ 		namespaces,
+ 		guidelines,
+@@ -369,13 +448,21 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
  		inlineBudget: options.getInlineBudget?.() ?? DEFAULT_CODEMODE_INLINE_BUDGET,
  	});
  	const declaredNames = new Set(loadout.declared.map((tool) => tool.name));
@@ -2033,7 +2941,7 @@ index 648ba61..1e87da1 100644
  }
  
  /** Script globals that list or look up tools and namespaces, which the script may then call by any name. */
-@@ -391,6 +444,33 @@ function getScriptReach(code: unknown): "all" | readonly string[] {
+@@ -391,6 +478,33 @@ function getScriptReach(code: unknown): "all" | readonly string[] {
  	return DISCOVERY_GLOBALS.test(code) ? "all" : (code.match(/\w+/g) ?? []);
  }
  
@@ -2067,7 +2975,7 @@ index 648ba61..1e87da1 100644
  export function createCodemodeToolDefinition(
  	options: CodemodeToolOptions = {},
  ): ToolDefinition<typeof codemodeSchema, CodemodeToolDetails | undefined> {
-@@ -404,13 +484,63 @@ export function createCodemodeToolDefinition(
+@@ -404,13 +518,63 @@ export function createCodemodeToolDefinition(
  		parameters: codemodeSchema,
  		// Scripts must not start other scripts.
  		exposure: "model-only",
@@ -2282,21 +3190,193 @@ index 0000000..be1fc40
 +		},
 +	};
 +}
+diff --git a/packages/coding-agent/src/extensions/doctor/doctor.test.ts b/packages/coding-agent/src/extensions/doctor/doctor.test.ts
+new file mode 100644
+index 0000000..1e82964
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/doctor/doctor.test.ts
+@@ -0,0 +1,23 @@
++import { describe, expect, it } from "vitest";
++import { type Check, formatChecks } from "./index.ts";
++
++const check = (name: string, ok: boolean | undefined, detail = "x"): Check => ({ name, ok, detail });
++
++describe("formatChecks", () => {
++	it("marks each check and counts the failures", () => {
++		const text = formatChecks([check("model", true), check("credentials", false)]);
++		expect(text).toContain("✓ model");
++		expect(text).toContain("! credentials");
++		expect(text).toContain("2 checks · 1 failing · 0 unknown");
++	});
++
++	it("says so when everything passes", () => {
++		expect(formatChecks([check("model", true)])).toContain("All 1 checks passed.");
++	});
++
++	it("a check that could not run is unknown, not a pass", () => {
++		const text = formatChecks([check("cache contract", undefined, "no request yet")]);
++		expect(text).toContain("? cache contract");
++		expect(text).toContain("1 unknown");
++	});
++});
+diff --git a/packages/coding-agent/src/extensions/doctor/index.ts b/packages/coding-agent/src/extensions/doctor/index.ts
+new file mode 100644
+index 0000000..7238859
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/doctor/index.ts
+@@ -0,0 +1,136 @@
++/**
++ * `/doctor` — is this install able to do the thing?
++ *
++ * Every check answers a question a user would otherwise ask on a bug report: is a model configured,
++ * does it have credentials, did a policy file fail to load, is the script engine on, is the request
++ * still append-only. It reports what it measured and never guesses: a check that cannot run says so.
++ */
++
++import { accessSync, constants } from "node:fs";
++import { join } from "node:path";
++import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../core/extensions/types.ts";
++import { SETTINGS_DEFAULTS } from "../../core/settings-defaults.ts";
++import { loadPolicy } from "../safety/policy.ts";
++
++export interface Check {
++	name: string;
++	ok: boolean | undefined;
++	detail: string;
++}
++
++/** Format for the dialog: one line per check, failures first is the reader's job, not ours. */
++export function formatChecks(checks: readonly Check[]): string {
++	const lines = checks.map((check) => {
++		const mark = check.ok === undefined ? "?" : check.ok ? "✓" : "!";
++		return `${mark} ${check.name.padEnd(18)} ${check.detail}`;
++	});
++	const failed = checks.filter((check) => check.ok === false).length;
++	const unknown = checks.filter((check) => check.ok === undefined).length;
++	lines.push("");
++	lines.push(
++		failed === 0 && unknown === 0
++			? `All ${checks.length} checks passed.`
++			: `${checks.length} checks · ${failed} failing · ${unknown} unknown`,
++	);
++	return lines.join("\n");
++}
++
++function writable(path: string): boolean {
++	try {
++		accessSync(path, constants.W_OK);
++		return true;
++	} catch {
++		return false;
++	}
++}
++
++export function createDoctorExtension(): ExtensionFactory {
++	return (pi: ExtensionAPI) => {
++		pi.registerCommand("doctor", {
++			description: "Check the model, credentials, policy, script engine, and cache contract",
++			handler: async (_args: string, ctx: ExtensionCommandContext) => {
++				const checks: Check[] = [];
++				const settings = pi.getSettings();
++
++				const model = ctx.model;
++				checks.push({
++					name: "model",
++					ok: model ? true : false,
++					detail: model ? `${model.provider}/${model.id}` : "none selected: /model picks one",
++				});
++
++				if (model) {
++					const authed = ctx.modelRegistry.hasConfiguredAuth(model);
++					checks.push({
++						name: "credentials",
++						ok: authed,
++						detail: authed ? "configured" : `no key for ${model.provider}: reef auth login ${model.provider}`,
++					});
++				}
++
++				const tier = settings.safety?.tier ?? SETTINGS_DEFAULTS.safety.tier;
++				checks.push({
++					name: "safety tier",
++					ok: true,
++					detail: `${tier}${process.env.REEF_READ_ONLY === "1" ? " (read-only via env)" : ""}`,
++				});
++
++				const policy = loadPolicy({ cwd: ctx.cwd });
++				checks.push({
++					name: "policy files",
++					ok: policy.problems.length === 0,
++					detail:
++						policy.problems.length === 0
++							? `${policy.rules.length} rule(s) from ${policy.sources.length} file(s)`
++							: policy.problems.join("; "),
++				});
++
++				const active = pi.getActiveTools();
++				const facts = (
++					ctx as unknown as { getSectionBudget?: () => { tokens: number } | undefined }
++				).getSectionBudget?.();
++				checks.push({
++					name: "declared tools",
++					ok: active.length > 0,
++					detail: active.length > 0 ? `${active.join(", ")}${facts ? ` · ~${facts.tokens} tok` : ""}` : "none active",
++				});
++
++				const scriptEnabled = process.env.REEF_SCRIPT !== "off" && settings.script?.enabled !== false;
++				checks.push({
++					name: "script engine",
++					ok: true,
++					detail: scriptEnabled ? "on" : "off (script.enabled): tools are declared directly",
++				});
++
++				const sessionDir = join(ctx.cwd, ".reef");
++				checks.push({
++					name: "workspace",
++					ok: writable(ctx.cwd),
++					detail: writable(ctx.cwd) ? `${ctx.cwd} (state in ${sessionDir})` : `${ctx.cwd} is not writable`,
++				});
++
++				const audits = ctx.getRequestAudits();
++				const last = audits[audits.length - 1];
++				checks.push({
++					name: "cache contract",
++					ok: last ? last.appendOnly : undefined,
++					detail: last
++						? last.appendOnly
++							? `append-only · ${last.cacheablePrefixTokens} tok reused`
++							: `broke: ${last.breakReason ?? last.violations[0] ?? "unexpected"}`
++						: "no request yet",
++				});
++
++				const unknownCount = checks.filter((check) => check.ok === undefined).length;
++				const failed = checks.filter((check) => check.ok === false).length;
++				ctx.ui?.notify?.(formatChecks(checks));
++				// A command cannot set an exit code, but it can say which way the answer went.
++				if (failed > 0) process.env.REEF_DOCTOR_FAILED = "1";
++				else delete process.env.REEF_DOCTOR_FAILED;
++				if (unknownCount > 0) process.env.REEF_DOCTOR_UNKNOWN = "1";
++			},
++		});
++	};
++}
++
++export default createDoctorExtension();
 diff --git a/packages/coding-agent/src/extensions/index.ts b/packages/coding-agent/src/extensions/index.ts
-index 81461dd..b3ac87c 100644
+index 81461dd..c813f5b 100644
 --- a/packages/coding-agent/src/extensions/index.ts
 +++ b/packages/coding-agent/src/extensions/index.ts
-@@ -2,6 +2,9 @@ import type { InlineExtension } from "../core/extensions/types.ts";
+@@ -2,6 +2,10 @@ import type { InlineExtension } from "../core/extensions/types.ts";
  import codemodeExtension from "./codemode/index.ts";
  import llamaExtension from "./llama/index.ts";
  import mcpExtension from "./mcp/index.ts";
 +import safetyExtension from "./safety/index.ts";
 +import reefStatsExtension from "./reef-stats/index.ts";
++import doctorExtension from "./doctor/index.ts";
 +import tasksExtension from "./tasks/index.ts";
  import toolSearchExtension from "./tool-search/index.ts";
  
  export const builtInExtensions: InlineExtension[] = [
-@@ -11,4 +14,8 @@ export const builtInExtensions: InlineExtension[] = [
+@@ -11,4 +15,9 @@ export const builtInExtensions: InlineExtension[] = [
  	{ name: "codemode", factory: codemodeExtension, replaceable: true, builtin: true },
  	{ name: "tool-search", factory: toolSearchExtension, replaceable: true, builtin: true },
  	{ name: "mcp", factory: mcpExtension, replaceable: true, builtin: true },
@@ -2304,6 +3384,7 @@ index 81461dd..b3ac87c 100644
 +	{ name: "safety", factory: safetyExtension, builtin: true },
 +	{ name: "reef-stats", factory: reefStatsExtension, builtin: true },
 +	{ name: "tasks", factory: tasksExtension, builtin: true },
++	{ name: "doctor", factory: doctorExtension, builtin: true },
  ];
 diff --git a/packages/coding-agent/src/extensions/llama/index.ts b/packages/coding-agent/src/extensions/llama/index.ts
 index 1e3b9ce..8dea93a 100644
@@ -2452,10 +3533,10 @@ index 0000000..b79ac6c
 +});
 diff --git a/packages/coding-agent/src/extensions/reef-stats/index.ts b/packages/coding-agent/src/extensions/reef-stats/index.ts
 new file mode 100644
-index 0000000..0b5bbac
+index 0000000..186f6e1
 --- /dev/null
 +++ b/packages/coding-agent/src/extensions/reef-stats/index.ts
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,313 @@
 +/**
 + * Measurement, in the harness rather than in a spreadsheet.
 + *
@@ -2468,7 +3549,9 @@ index 0000000..0b5bbac
 + */
 +
 +import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types.ts";
++import { formatDuration, listJobs } from "../codemode/jobs.ts";
 +import { TASK_ENTRY_TYPE as REEF_TASK_ENTRY_TYPE } from "../tasks/index.ts";
++import { SECTION_BUDGETS } from "../../core/request-audit.ts";
 +
 +/** Session custom-entry type holding one model call's usage. */
 +export const REEF_REQUEST_ENTRY_TYPE = "reef-request";
@@ -2590,6 +3673,50 @@ index 0000000..0b5bbac
 +				}
 +				const budget = ctx.getSectionBudget();
 +				if (budget) lines.push("", `total prompt: ${budget.tokens} tokens`);
++				ctx.ui?.notify?.(lines.join("\n"));
++			},
++		});
++
++		pi.registerCommand("context", {
++			description: "What the next request will contain, section by section",
++			handler: async (_args: string, ctx) => {
++				const budget = ctx.getSectionBudget();
++				if (!budget) {
++					ctx.ui?.notify?.("No request yet. The budget is measured when the first one is built.");
++					return;
++				}
++				const rows = Object.entries(budget.sections).map(([name, text]) => {
++					const tokens = Math.ceil(text.length / 3.6);
++					const limit = SECTION_BUDGETS[name];
++					const mark = limit && tokens > limit.target ? (tokens > limit.cap ? " !!" : " !") : "";
++					return `${name.padEnd(16)} ${String(tokens).padStart(6)}${limit ? ` / ${limit.target}` : ""}${mark}`;
++				});
++				const truncated = budget.truncated.length
++					? ["", "Truncated:", ...budget.truncated.map((entry) => `  ${entry.name}: kept ${entry.kept} lines, dropped ${entry.dropped}`)]
++					: [];
++				const audit = ctx.getRequestAudits().at(-1);
++				const contract = audit
++					? ["", `Append-only: ${audit.appendOnly ? "yes" : `no (${audit.breakReason ?? "unexpected"})`}`, `Cacheable prefix: ${audit.cacheablePrefixTokens} tokens`]
++					: [];
++				ctx.ui?.notify?.([...rows, "", `total ${budget.tokens} tokens`, ...truncated, ...contract].join("\n"));
++			},
++		});
++
++		pi.registerCommand("jobs", {
++			description: "Background scripts and subagents in this session",
++			handler: async (_args: string, ctx) => {
++				const jobs = listJobs();
++				if (jobs.length === 0) {
++					ctx.ui?.notify?.("No background jobs. A script with `// @script: startInBackground` keeps running after it returns.");
++					return;
++				}
++				const lines = jobs.map((job) => {
++					const ms = (job.finishedAt ?? Date.now()) - job.startedAt;
++					const calls = job.calls ? ` · ${job.calls} call${job.calls === 1 ? "" : "s"}` : "";
++					return `${job.id.padEnd(18)} ${job.status.padEnd(12)} ${formatDuration(ms)}${calls}`;
++				});
++				const running = jobs.filter((job) => job.status === "running").length;
++				lines.push("", `${running} running · ${jobs.length} total`);
 +				ctx.ui?.notify?.(lines.join("\n"));
 +			},
 +		});
@@ -2723,12 +3850,218 @@ index 0000000..0b5bbac
 +}
 +
 +export default createReefStatsExtension();
+diff --git a/packages/coding-agent/src/extensions/safety/approvals.test.ts b/packages/coding-agent/src/extensions/safety/approvals.test.ts
+new file mode 100644
+index 0000000..a02e80a
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/safety/approvals.test.ts
+@@ -0,0 +1,92 @@
++import { describe, expect, it, vi } from "vitest";
++import { ApprovalBatcher, type ApprovalRequest, describeBatch } from "./approvals.ts";
++
++const request = (summary: string, tool = "bash"): ApprovalRequest => ({ summary, reason: "builtin/remote-write", tool });
++
++describe("ApprovalBatcher", () => {
++	it("shows one dialog for calls that arrive together", async () => {
++		const confirm = vi.fn(async (_requests: readonly ApprovalRequest[]) => true);
++		const batcher = new ApprovalBatcher({ confirm, schedule: () => {} });
++		const first = batcher.ask(request("git push origin main"));
++		const second = batcher.ask(request("git push origin dev"));
++		expect(batcher.size).toBe(2);
++		await batcher.flush();
++		expect(confirm).toHaveBeenCalledTimes(1);
++		expect(confirm.mock.calls[0]?.[0]).toHaveLength(2);
++		expect(await first).toBe(true);
++		expect(await second).toBe(true);
++	});
++
++	it("a denial denies every request in the batch", async () => {
++		const batcher = new ApprovalBatcher({ confirm: async () => false, schedule: () => {} });
++		const first = batcher.ask(request("a"));
++		const second = batcher.ask(request("b"));
++		await batcher.flush();
++		expect(await first).toBe(false);
++		expect(await second).toBe(false);
++	});
++
++	it("a dialog that throws denies, because the safe direction is the one that stops", async () => {
++		const batcher = new ApprovalBatcher({
++			confirm: async () => {
++				throw new Error("ui is gone");
++			},
++			schedule: () => {},
++		});
++		const asked = batcher.ask(request("rm -rf build"));
++		await batcher.flush();
++		expect(await asked).toBe(false);
++	});
++
++	it("a lone ask still gets its own dialog", async () => {
++		const confirm = vi.fn(async (_requests: readonly ApprovalRequest[]) => true);
++		const batcher = new ApprovalBatcher({ confirm, schedule: () => {} });
++		const asked = batcher.ask(request("npm publish"));
++		await batcher.flush();
++		expect(confirm).toHaveBeenCalledTimes(1);
++		expect(await asked).toBe(true);
++	});
++
++	it("schedules exactly one flush for a burst", async () => {
++		const run: (() => void)[] = [];
++		const batcher = new ApprovalBatcher({ confirm: async () => true, schedule: (fn) => run.push(fn) });
++		batcher.ask(request("a"));
++		batcher.ask(request("b"));
++		batcher.ask(request("c"));
++		expect(run).toHaveLength(1);
++		await batcher.flush();
++		expect(batcher.size).toBe(0);
++	});
++
++	it("an empty flush does nothing", async () => {
++		const confirm = vi.fn(async (_requests: readonly ApprovalRequest[]) => true);
++		const batcher = new ApprovalBatcher({ confirm, schedule: () => {} });
++		await batcher.flush();
++		expect(confirm).not.toHaveBeenCalled();
++	});
++});
++
++describe("describeBatch", () => {
++	it("names the tool and the reason for one call", () => {
++		const { title, body } = describeBatch([request("git push origin main")]);
++		expect(title).toBe("Allow this bash call?");
++		expect(body).toContain("git push origin main");
++		expect(body).toContain("builtin/remote-write");
++	});
++
++	it("numbers the calls and shares a common reason", () => {
++		const { title, body } = describeBatch([request("one"), request("two"), request("three")]);
++		expect(title).toBe("Allow 3 calls?");
++		expect(body).toContain("1. bash: one");
++		expect(body).toContain("3. bash: three");
++		expect(body).toContain("builtin/remote-write");
++	});
++
++	it("says so when several rules apply", () => {
++		const { body } = describeBatch([
++			request("one"),
++			{ summary: "two", reason: "builtin/force-push", tool: "bash" },
++		]);
++		expect(body).toContain("Several rules apply.");
++	});
++});
+diff --git a/packages/coding-agent/src/extensions/safety/approvals.ts b/packages/coding-agent/src/extensions/safety/approvals.ts
+new file mode 100644
+index 0000000..4e9ea7a
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/safety/approvals.ts
+@@ -0,0 +1,102 @@
++/**
++ * Approvals, batched.
++ *
++ * A model that issues six shell calls in one turn should ask the user once, not six times: six
++ * dialogs is how a person learns to press "yes" without reading. Calls that arrive together are
++ * collected for a window of a few milliseconds and shown as one list.
++ *
++ * The window is short because it is not waiting for a human, only for the other calls in the same
++ * batch to arrive. A single call costs one dialog, as it should.
++ */
++
++/** How long to collect neighbouring asks before showing the one dialog. */
++export const APPROVAL_WINDOW_MS = 40;
++
++export interface ApprovalRequest {
++	/** What is being asked, in one quotable line. */
++	summary: string;
++	/** Why the policy wants a human: the rule, the tier, the reason. */
++	reason: string;
++	/** Tool name, for the dialog heading and for logging. */
++	tool: string;
++}
++
++export interface ApprovalBatchOptions {
++	/** Shows one dialog for several requests. Returns true to allow every one of them. */
++	confirm: (requests: readonly ApprovalRequest[]) => Promise<boolean>;
++	/** Milliseconds to wait for neighbours. Defaults to {@link APPROVAL_WINDOW_MS}. */
++	windowMs?: number;
++	/** Injectable so the batcher can be tested without timers. Defaults to `setTimeout`. */
++	schedule?: (run: () => void, ms: number) => void;
++}
++
++interface Pending {
++	request: ApprovalRequest;
++	resolve: (allowed: boolean) => void;
++}
++
++/**
++ * Collects asks that arrive within the window and resolves them with one decision.
++ *
++ * A denial is per request: if the user says no, every request in that batch is denied, because they
++ * were presented as one decision and pretending otherwise would hide what was refused.
++ */
++export class ApprovalBatcher {
++	private pending: Pending[] = [];
++	private scheduled = false;
++	private readonly confirm: ApprovalBatchOptions["confirm"];
++	private readonly windowMs: number;
++	private readonly schedule: (run: () => void, ms: number) => void;
++
++	constructor(options: ApprovalBatchOptions) {
++		this.confirm = options.confirm;
++		this.windowMs = options.windowMs ?? APPROVAL_WINDOW_MS;
++		this.schedule = options.schedule ?? ((run, ms) => void setTimeout(run, ms));
++	}
++
++	/** Ask for one request. Resolves true when it may proceed. */
++	ask(request: ApprovalRequest): Promise<boolean> {
++		return new Promise<boolean>((resolve) => {
++			this.pending.push({ request, resolve });
++			if (this.scheduled) return;
++			this.scheduled = true;
++			this.schedule(() => void this.flush(), this.windowMs);
++		});
++	}
++
++	/** Number of requests waiting for the dialog. */
++	get size(): number {
++		return this.pending.length;
++	}
++
++	/** Show the dialog for everything collected so far. Safe to call directly, which tests do. */
++	async flush(): Promise<void> {
++		if (this.pending.length === 0) {
++			this.scheduled = false;
++			return;
++		}
++		const batch = this.pending;
++		this.pending = [];
++		this.scheduled = false;
++		let allowed = false;
++		try {
++			allowed = await this.confirm(batch.map((entry) => entry.request));
++		} catch {
++			// A dialog that throws is a denial: the safe direction is the one that stops.
++			allowed = false;
++		}
++		for (const entry of batch) entry.resolve(allowed);
++	}
++}
++
++/** The dialog text: one line per call, and the shared reason when they agree. */
++export function describeBatch(requests: readonly ApprovalRequest[]): { title: string; body: string } {
++	if (requests.length === 1) {
++		const only = requests[0]!;
++		return { title: `Allow this ${only.tool} call?`, body: `${only.summary}\n\n${only.reason}` };
++	}
++	const reasons = new Set(requests.map((entry) => entry.reason));
++	const lines = requests.map((entry, index) => `${index + 1}. ${entry.tool}: ${entry.summary}`);
++	const body = [lines.join("\n"), "", reasons.size === 1 ? [...reasons][0]! : "Several rules apply."].join("\n");
++	return { title: `Allow ${requests.length} calls?`, body };
++}
 diff --git a/packages/coding-agent/src/extensions/safety/index.ts b/packages/coding-agent/src/extensions/safety/index.ts
 new file mode 100644
-index 0000000..a5af2a6
+index 0000000..cc949ac
 --- /dev/null
 +++ b/packages/coding-agent/src/extensions/safety/index.ts
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,149 @@
 +/**
 + * The safety floor as an extension: one `tool_call` handler between the model and every tool.
 + *
@@ -2739,7 +4072,8 @@ index 0000000..a5af2a6
 + * reason, so the next attempt can be a better one.
 + */
 +
-+import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types.ts";
++import type { ExtensionAPI, ExtensionFactory, ExtensionUIContext } from "../../core/extensions/types.ts";
++import { ApprovalBatcher, describeBatch } from "./approvals.ts";
 +import { SETTINGS_DEFAULTS } from "../../core/settings-defaults.ts";
 +import { type LoadedPolicy, loadPolicy } from "./policy.ts";
 +import { checkRules } from "./rules.ts";
@@ -2820,8 +4154,21 @@ index 0000000..a5af2a6
 +
 +		/** Commands the user approved in this session, so the same ask is not shown twice. */
 +		const approved = new Set<string>();
++		// One dialog per batch, not per call: six prompts in a row teaches people to press yes.
++		// The dialog belongs to the call that raised it, so the handler records the UI first.
++		let activeUI: ExtensionUIContext | undefined;
++		const batcher = new ApprovalBatcher({
++			confirm: async (requests) => {
++				if (!activeUI) return false;
++				const { title, body } = describeBatch(requests);
++				const ok = await activeUI.confirm(title, body);
++				if (ok) for (const request of requests) approved.add(request.tool + "\u0000" + request.summary);
++				return ok;
++			},
++		});
 +
 +		pi.on("tool_call", async (event, ctx) => {
++			activeUI = ctx.ui;
 +			const tier = options.tier ?? readTier(pi);
 +			const context: Context = {
 +				cwd: ctx.cwd,
@@ -2837,19 +4184,12 @@ index 0000000..a5af2a6
 +			const verdict = decideWithPolicy(call, context, current(ctx.cwd).rules);
 +			if (verdict.decision === "allow") return;
 +			if (verdict.decision === "ask" && !context.headless && ctx.ui) {
-+				// Interactive: ask, once per distinct command per session. A batch of identical asks is
-+				// noise, not diligence.
++				// Interactive: ask once per distinct call per session, and once per batch rather than
++				// once per call. A repeated ask is noise, not diligence.
 +				const key = `${call.tool}\u0000${summarize(call)}`;
-+				if (!approved.has(key)) {
-+					const ok = await ctx.ui.confirm(
-+						`Allow this ${call.tool} call?`,
-+						`${summarize(call)}\n\n${verdict.reason}`,
-+					);
-+					if (!ok) {
-+						return { block: true, reason: `policy_denied: ${verdict.reason}` };
-+					}
-+					approved.add(key);
-+				}
++				if (approved.has(key)) return;
++				const allowed = await batcher.ask({ tool: call.tool, summary: summarize(call), reason: verdict.reason });
++				if (!allowed) return { block: true, reason: `policy_denied: ${verdict.reason}` };
 +				return;
 +			}
 +			const label = verdict.ruleId ? `policy_block (${verdict.ruleId})` : "policy_block";
@@ -4998,18 +6338,20 @@ index 0000000..7ee60fe
 +	});
 +});
 diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
-index 34111cc..40e7d36 100644
+index 34111cc..12113f4 100644
 --- a/packages/coding-agent/src/main.ts
 +++ b/packages/coding-agent/src/main.ts
-@@ -30,6 +30,7 @@ import { resolveCredentialForPrint } from "./cli/credential-print.ts";
+@@ -30,6 +30,9 @@ import { resolveCredentialForPrint } from "./cli/credential-print.ts";
  import { processFileArguments } from "./cli/file-processor.ts";
  import { buildInitialMessage } from "./cli/initial-message.ts";
  import { listModels } from "./cli/list-models.ts";
++import { runExecCommand } from "./cli/exec-command.ts";
++import { runSearchCommand } from "./cli/search-command.ts";
 +import { runPermissionsCommand } from "./cli/permissions-command.ts";
  import { createProjectTrustContext } from "./cli/project-trust.ts";
  import { selectSession } from "./cli/session-picker.ts";
  import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
-@@ -576,16 +577,22 @@ export async function main(args: string[], options?: MainOptions) {
+@@ -576,16 +579,34 @@ export async function main(args: string[], options?: MainOptions) {
  	// Commands and startup selectors can load user-authored themes before runtime creation.
  	setThemeJsonValidator(validateThemeJson);
  	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
@@ -5026,6 +6368,18 @@ index 34111cc..40e7d36 100644
  		return;
  	}
  
++	const search = runSearchCommand(args);
++	if (search.handled) {
++		process.exitCode = search.exitCode ?? 0;
++		return;
++	}
++
++	const exec = await runExecCommand(args);
++	if (exec.handled) {
++		process.exitCode = exec.exitCode ?? 0;
++		return;
++	}
++
 +	const permissions = runPermissionsCommand(args);
 +	if (permissions.handled) {
 +		process.exitCode = permissions.exitCode ?? 0;
@@ -5035,7 +6389,7 @@ index 34111cc..40e7d36 100644
  	if (process.platform === "win32") {
  		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
  	}
-@@ -940,9 +947,9 @@ export async function main(args: string[], options?: MainOptions) {
+@@ -940,9 +961,9 @@ export async function main(args: string[], options?: MainOptions) {
  		process.exit(1);
  	}
  
@@ -5048,9 +6402,18 @@ index 34111cc..40e7d36 100644
  	}
  
 diff --git a/packages/coding-agent/src/modes/interactive/bug-report.ts b/packages/coding-agent/src/modes/interactive/bug-report.ts
-index 51034e0..ad3f8b9 100644
+index 51034e0..23c0ff3 100644
 --- a/packages/coding-agent/src/modes/interactive/bug-report.ts
 +++ b/packages/coding-agent/src/modes/interactive/bug-report.ts
+@@ -42,7 +42,7 @@ interface BugReportOptions {
+ type Overlay = Container & { dispose?: () => void };
+ 
+ const DISCLAIMER =
+-	"This report goes to the Pi developers (Earendil) and is not shared publicly. It includes your pi version, operating system, the current model and provider configuration (without API keys), loaded extensions, settings, and provider error diagnostics from this session.";
++	"This report includes your REEF version, operating system, the current model and provider configuration (without API keys), loaded extensions, settings, and provider error diagnostics from this session. It is shown to you before anything is sent.";
+ const TRANSCRIPT_NOTE =
+ 	"The transcript contains your messages, model output, tool calls and their results, including file contents and command output read during this session.";
+ 
 @@ -53,7 +53,7 @@ export async function reportBug(context: BugReportContext, initialHint?: string)
  		context.showStatus("Bug report cancelled");
  		return;
@@ -5060,6 +6423,180 @@ index 51034e0..ad3f8b9 100644
  		context.showError("Uploading bug reports requires online mode. Use Export as Zip instead.");
  		return;
  	}
+diff --git a/packages/coding-agent/src/modes/interactive/components/first-time-setup.ts b/packages/coding-agent/src/modes/interactive/components/first-time-setup.ts
+index f115d2b..dc4dbdd 100644
+--- a/packages/coding-agent/src/modes/interactive/components/first-time-setup.ts
++++ b/packages/coding-agent/src/modes/interactive/components/first-time-setup.ts
+@@ -2,6 +2,7 @@ import { Container, getKeybindings, Spacer, Text } from "@earendil-works/pi-tui"
+ import { APP_NAME } from "../../../config.ts";
+ import { SYSTEM_THEME_NAME } from "../theme/system-theme.ts";
+ import { theme } from "../theme/theme.ts";
++import { reefLogoLines, reefWordmark, supportsReefLogo } from "./reef-logo.ts";
+ import { DynamicBorder } from "./dynamic-border.ts";
+ import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
+ 
+@@ -22,18 +23,11 @@ const THEME_OPTIONS: Array<{ value: string; label: string }> = [
+ 	{ value: "light", label: "Light" },
+ ];
+ 
+-const ANALYTICS_OPTIONS: Array<{ value: boolean; label: string }> = [
+-	{ value: true, label: "Share anonymous usage data" },
+-	{ value: false, label: "Don't share" },
+-];
+-
+-const SETUP_LOGO_LINES = ["██████", "██  ██", "████  ██", "██    ██"];
+-
+-/** First-time setup dialog: theme choice and analytics opt-in. */
++/** First-time setup: one question, the theme. REEF records nothing, so nothing is asked about. */
+ export class FirstTimeSetupComponent extends Container {
+-	private step: "theme" | "analytics" = "theme";
++	/** REEF asks one question: which theme. There is no telemetry, so there is nothing to opt into. */
++	private step: "theme" = "theme";
+ 	private themeIndex: number;
+-	private analyticsIndex = 0;
+ 	private readonly options: FirstTimeSetupOptions;
+ 
+ 	constructor(options: FirstTimeSetupOptions) {
+@@ -54,45 +48,33 @@ export class FirstTimeSetupComponent extends Container {
+ 		this.clear();
+ 		this.addChild(new DynamicBorder());
+ 		this.addChild(new Spacer(1));
+-		this.addChild(new Text(theme.fg("accent", SETUP_LOGO_LINES.join("\n")), 1, 0));
++		// The same mark the header uses, so the first screen and every later one agree.
++		this.addChild(new Text(supportsReefLogo() ? reefLogoLines().join("\n") : reefWordmark(), 1, 0));
+ 		this.addChild(new Spacer(1));
+ 		this.addChild(
+-			new Text(theme.fg("accent", theme.bold(`Welcome to ${APP_NAME}, the minimal coding agent.`)), 1, 0),
++			new Text(
++				theme.fg("accent", theme.bold(`Welcome to ${APP_NAME}.`)) +
++					"\n" +
++					theme.fg("muted", "One script, many tool calls. Pick a theme; nothing else is asked."),
++				1,
++				0,
++			),
+ 		);
+ 		this.addChild(new Spacer(1));
+ 
+-		if (this.step === "theme") {
+-			this.addChild(new Text(theme.fg("text", "Pick a theme."), 1, 0));
+-			this.addChild(new Spacer(1));
+-			this.addOptionList(
+-				THEME_OPTIONS.map((option) => option.label),
+-				this.themeIndex,
+-			);
+-		} else {
+-			this.addChild(new Text(theme.fg("text", "Opt-in to anonymous usage data sharing?"), 1, 0));
+-			this.addChild(
+-				new Text(
+-					theme.fg(
+-						"muted",
+-						"Opting in stores a tracking identifier in settings.json and enables anonymous\nusage analytics. This helps us to better debug, reproduce, and resolve issues\nand bugs within Pi. You can observe what is shared using /privacy and make\nchanges anytime in settings.json.",
+-					),
+-					1,
+-					0,
+-				),
+-			);
+-			this.addChild(new Spacer(1));
+-			this.addOptionList(
+-				ANALYTICS_OPTIONS.map((option) => option.label),
+-				this.analyticsIndex,
+-			);
+-		}
++		this.addChild(new Text(theme.fg("text", "Pick a theme. Enter to start."), 1, 0));
++		this.addChild(new Spacer(1));
++		this.addOptionList(
++			THEME_OPTIONS.map((option) => option.label),
++			this.themeIndex,
++		);
+ 
+ 		this.addChild(new Spacer(1));
+ 		this.addChild(
+ 			new Text(
+ 				rawKeyHint("↑↓", "navigate") +
+ 					"  " +
+-					keyHint("tui.select.confirm", this.step === "theme" ? "continue" : "finish") +
++					keyHint("tui.select.confirm", "start") +
+ 					"  " +
+ 					keyHint("tui.select.cancel", "skip setup"),
+ 				1,
+@@ -119,8 +101,6 @@ export class FirstTimeSetupComponent extends Container {
+ 				this.themeIndex = next;
+ 				this.options.onThemePreview(THEME_OPTIONS[this.themeIndex].value);
+ 			}
+-		} else {
+-			this.analyticsIndex = Math.max(0, Math.min(ANALYTICS_OPTIONS.length - 1, this.analyticsIndex + delta));
+ 		}
+ 		this.update();
+ 	}
+@@ -132,15 +112,11 @@ export class FirstTimeSetupComponent extends Container {
+ 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
+ 			this.moveSelection(1);
+ 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
+-			if (this.step === "theme") {
+-				this.step = "analytics";
+-				this.update();
+-			} else {
+-				this.options.onSubmit({
+-					theme: THEME_OPTIONS[this.themeIndex].value,
+-					shareAnalytics: ANALYTICS_OPTIONS[this.analyticsIndex].value,
+-				});
+-			}
++			this.options.onSubmit({
++				theme: THEME_OPTIONS[this.themeIndex].value,
++				// No telemetry, so nothing is shared. The field stays because the caller's type has it.
++				shareAnalytics: false,
++			});
+ 		} else if (kb.matches(keyData, "tui.select.cancel")) {
+ 			this.options.onCancel();
+ 		}
+diff --git a/packages/coding-agent/src/modes/interactive/components/footer.ts b/packages/coding-agent/src/modes/interactive/components/footer.ts
+index 8bb7b35..93a63b6 100644
+--- a/packages/coding-agent/src/modes/interactive/components/footer.ts
++++ b/packages/coding-agent/src/modes/interactive/components/footer.ts
+@@ -59,11 +59,29 @@ interface SessionStats {
+  * Footer component that shows pwd, token stats, and context usage.
+  * Computes token/context stats from session, gets git branch and extension statuses from provider.
+  */
++/**
++ * REEF: what the harness is spending before it does anything. `tools 2` is the declared surface and
++ * `~1.6k` the request it costs; `med` is the safety tier. They are the two numbers a REEF user tunes,
++ * so they belong in the footer rather than behind a command.
++ */
++export interface ReefFooterFacts {
++	declaredTools: number;
++	promptTokens: number;
++	tier: string;
++	jobs: number;
++}
++
+ export class FooterComponent implements Component {
+ 	private autoCompactEnabled = true;
+ 	private session: AgentSession;
+ 	private footerData: ReadonlyFooterDataProvider;
+ 	private sessionStats?: SessionStats;
++	/** Supplied by interactive-mode from the request audit and the job registry. */
++	private reefFacts?: ReefFooterFacts;
++
++	setReefFacts(facts: ReefFooterFacts | undefined): void {
++		this.reefFacts = facts;
++	}
+ 
+ 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
+ 		this.session = session;
+@@ -210,6 +228,13 @@ export class FooterComponent implements Component {
+ 			contextPercentStr = contextPercentDisplay;
+ 		}
+ 		statsParts.push(contextPercentStr);
++		if (this.reefFacts) {
++			const { declaredTools, promptTokens, tier, jobs } = this.reefFacts;
++			// Dim, because these are budget facts rather than usage: nothing here moves on its own.
++			statsParts.push(theme.fg("dim", `⚙${declaredTools} ~${formatTokens(promptTokens)}`));
++			statsParts.push(theme.fg(tier === "none" ? "warning" : "dim", tier));
++			if (jobs > 0) statsParts.push(theme.fg("dim", `⧗${jobs}`));
++		}
+ 		if (areExperimentalFeaturesEnabled()) {
+ 			statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
+ 		}
 diff --git a/packages/coding-agent/src/modes/interactive/components/pi-logo.ts b/packages/coding-agent/src/modes/interactive/components/pi-logo.ts
 deleted file mode 100644
 index cd606a1..0000000
@@ -5152,10 +6689,20 @@ index 0000000..7f8c48e
 +	return `${fg(TEAL)}REEF${RESET}`;
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index 268a7fa..1795dfd 100644
+index 268a7fa..649494d 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-@@ -163,7 +163,7 @@ import {
+@@ -151,7 +151,8 @@ import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
+ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
+ import { ExtensionInputComponent } from "./components/extension-input.ts";
+ import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
+-import { FooterComponent, formatTokens } from "./components/footer.ts";
++import { FooterComponent, formatTokens, type ReefFooterFacts } from "./components/footer.ts";
++import { listJobs } from "../../extensions/codemode/jobs.ts";
+ import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
+ import { LoginDialogComponent } from "./components/login-dialog.ts";
+ import { createMarkdownTransform } from "./components/markdown-transform.ts";
+@@ -163,7 +164,7 @@ import {
  	formatAuthSelectorProviderType,
  	OAuthSelectorComponent,
  } from "./components/oauth-selector.ts";
@@ -5164,11 +6711,50 @@ index 268a7fa..1795dfd 100644
  import { createLoginMenuSelector } from "./components/radius-login-selector.ts";
  import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
  import { SessionSelectorComponent } from "./components/session-selector.ts";
-@@ -1035,10 +1035,10 @@ export class InteractiveMode {
+@@ -373,7 +374,7 @@ type LoginProviderCompletionOption = {
+ 	subscription?: boolean;
+ };
+ 
+-const RADIUS_LOGIN_INTRO = "Radius is a service crafted for Pi by the builders of Pi, Earendil Works";
++const RADIUS_LOGIN_INTRO = "Radius is a third-party service, not part of REEF";
+ 
+ const AUTH_TYPE_ORDER = { oauth: 0, api_key: 1 } satisfies Record<AuthSelectorProvider["authType"], number>;
+ 
+@@ -481,6 +482,27 @@ export class InteractiveMode {
+ 	private activeSelectorToken?: object;
+ 	private activeSelectorDispose?: () => void;
+ 	private footer: FooterComponent;
++	/** Last value handed to the footer, so a frame that changes nothing does not repaint. */
++	private lastReefFacts = "";
++
++	/**
++	 * REEF's own footer numbers: the declared tool surface, the request it costs, the safety tier,
++	 * and how many background jobs are running. Recomputed cheaply and only re-rendered on change.
++	 */
++	private refreshReefFacts(): void {
++		const countRunningJobs = () => listJobs().filter((job) => job.status === "running").length;
++		const facts = this.session.getHarnessFacts();
++		const tier = this.settingsManager.getSettings().safety?.tier ?? "medium";
++		const jobs = countRunningJobs();
++		const next: ReefFooterFacts | undefined = facts
++			? { declaredTools: facts.declaredTools, promptTokens: facts.promptTokens, tier, jobs }
++			: undefined;
++		const key = next ? `${next.declaredTools}:${next.promptTokens}:${next.tier}:${next.jobs}` : "none";
++		if (key === this.lastReefFacts) return;
++		this.lastReefFacts = key;
++		this.footer.setReefFacts(next);
++		this.ui.requestRender();
++	}
+ 	private footerContainer: Container;
+ 	private footerDataProvider: FooterDataProvider;
+ 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
+@@ -1034,11 +1056,11 @@ export class InteractiveMode {
+ 			const showDetails = this.shouldShowStartupDetails();
  			// Built on demand so the header follows theme changes. The logo's first line carries the version,
  			// its second line the first line of key hints. Terminals that cannot render the logo get a
- 			// "Pi vX" line instead, with the key hints below it.
+-			// "Pi vX" line instead, with the key hints below it.
 -			const showLogo = supportsPiLogo();
++			// "REEF vX" line instead, with the key hints below it.
 +			const showLogo = supportsReefLogo();
  			const withLogo = (hints: string) => {
 -				if (!showLogo) return `${piWordmark()} ${theme.fg("dim", `v${this.version}`)}\n${hints}`;
@@ -5178,7 +6764,19 @@ index 268a7fa..1795dfd 100644
  				return `${top} ${theme.fg("dim", `v${this.version}`)}\n${bottom} ${hints}`;
  			};
  
-@@ -1171,7 +1171,7 @@ export class InteractiveMode {
+@@ -1084,7 +1106,10 @@ export class InteractiveMode {
+ 					`Press ${keyText("app.tools.expand")} to show full startup help${showDetails ? " and loaded resources" : ""}.`,
+ 				);
+ 			const onboarding = () =>
+-				theme.fg("dim", `Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`);
++				theme.fg(
++					"dim",
++					`Ask it to explain its own tools, or type /help. /doctor checks the install, /cost shows what it spent.`,
++				);
+ 			const header = new BuiltInHeader(
+ 				() => `${withLogo(compactInstructions())}\n${compactOnboarding()}\n\n${onboarding()}`,
+ 				() => `${withLogo(expandedInstructions())}\n\n${onboarding()}`,
+@@ -1171,7 +1196,7 @@ export class InteractiveMode {
  	async run(): Promise<void> {
  		await this.init();
  
@@ -5187,7 +6785,16 @@ index 268a7fa..1795dfd 100644
  			const controller = new AbortController();
  			const timeout = setTimeout(() => controller.abort(), 15_000);
  			void refreshModelCatalogs(this.session.modelRuntime, controller.signal)
-@@ -1286,7 +1286,7 @@ export class InteractiveMode {
+@@ -1196,7 +1221,7 @@ export class InteractiveMode {
+ 			})
+ 			.finally(() => {
+ 				// On Windows, npm can overwrite the shared console title while checking
+-				// extension package versions. Restore Pi's title after the startup check.
++				// extension package versions. Restore the title after the startup check.
+ 				if (process.platform === "win32" && this.isInitialized) {
+ 					this.updateTerminalTitle();
+ 				}
+@@ -1286,7 +1311,7 @@ export class InteractiveMode {
  	}
  
  	private async checkForPackageUpdates(): Promise<string[]> {
@@ -5196,7 +6803,25 @@ index 268a7fa..1795dfd 100644
  			return [];
  		}
  
-@@ -1454,7 +1454,7 @@ export class InteractiveMode {
+@@ -1344,7 +1369,7 @@ export class InteractiveMode {
+ 		}
+ 
+ 		if (extendedKeysFormat === "xterm") {
+-			return "tmux extended-keys-format is xterm. Pi works best with csi-u. Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux.";
++			return "tmux extended-keys-format is xterm. REEF works best with csi-u. Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux.";
+ 		}
+ 
+ 		return undefined;
+@@ -1426,7 +1451,7 @@ export class InteractiveMode {
+ 			if (newEntries.length > 0) {
+ 				this.settingsManager.setExtensionChangelogVersion(key, pkg.version);
+ 				const name = pkg.name || sourceInfo.source;
+-				// Prefix each "## [x.y.z]" heading with the package name so entries render like Pi's own.
++				// Prefix each "## [x.y.z]" heading with the package name so entries render like REEF's own.
+ 				const markdown = newEntries
+ 					.map((entry) => entry.content.replace(/^##\s+/, `## ${name} `))
+ 					.join("\n\n")
+@@ -1454,7 +1479,7 @@ export class InteractiveMode {
  	}
  
  	private reportInstallTelemetry(version: string): void {
@@ -5205,7 +6830,47 @@ index 268a7fa..1795dfd 100644
  			return;
  		}
  
-@@ -7214,6 +7214,25 @@ export class InteractiveMode {
+@@ -2179,6 +2204,7 @@ export class InteractiveMode {
+ 		}
+ 		this.footer.setSession(this.session);
+ 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
++		this.refreshReefFacts();
+ 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
+ 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
+ 		this.outputPad = this.settingsManager.getOutputPad();
+@@ -3724,6 +3750,8 @@ export class InteractiveMode {
+ 
+ 			case "tool_execution_end": {
+ 				if (event.isError) this.maybeShowInstallChangeWarning();
++				// A job that started or finished changes the footer's job count.
++				this.refreshReefFacts();
+ 				const component = this.pendingTools.get(event.toolCallId);
+ 				if (component) {
+ 					component.updateResult({ ...event.result, isError: event.isError, durationMs: event.durationMs });
+@@ -3734,6 +3762,8 @@ export class InteractiveMode {
+ 			}
+ 
+ 			case "agent_end":
++				// The first request of a session is what establishes the prompt cost in the footer.
++				this.refreshReefFacts();
+ 				if (this.settingsManager.getShowTerminalProgress()) {
+ 					this.ui.terminal.setProgress(false);
+ 				}
+@@ -4451,6 +4481,13 @@ export class InteractiveMode {
+ 		this.stop();
+ 		await this.runtimeHost.dispose();
+ 
++		const summary = this.session.getHarnessFacts();
++		if (summary) {
++			// One line, not a report: what this session cost to run and how wide the tool surface was.
++			process.stdout.write(
++				`${chalk.dim("Session:")} ${summary.requestCount ?? 0} request(s) · ~${summary.promptTokens} tok prompt · ${summary.declaredTools} declared tool(s)\n`,
++			);
++		}
+ 		const resumeCommand = formatResumeCommand(this.sessionManager);
+ 		if (resumeCommand) {
+ 			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
+@@ -7214,6 +7251,25 @@ export class InteractiveMode {
  	private async handleCompactCommand(customInstructions?: string): Promise<void> {
  		this.clearStatusIndicator();
  
@@ -5231,6 +6896,179 @@ index 268a7fa..1795dfd 100644
  		try {
  			await this.session.compact(customInstructions);
  		} catch {
+diff --git a/packages/coding-agent/src/modes/interactive/session-share.ts b/packages/coding-agent/src/modes/interactive/session-share.ts
+index 6908131..1efbca8 100644
+--- a/packages/coding-agent/src/modes/interactive/session-share.ts
++++ b/packages/coding-agent/src/modes/interactive/session-share.ts
+@@ -125,7 +125,7 @@ async function tryShareViaRadius(tmpFile: string, context: SessionShareContext):
+ 		const body = fs.readFileSync(tmpFile);
+ 		const url = new URL("/v1/artifacts", DEFAULT_RADIUS_GATEWAY);
+ 		url.searchParams.set("visibility", "organization");
+-		url.searchParams.set("title", "Pi session");
++		url.searchParams.set("title", "REEF session");
+ 		const response = await fetch(url, {
+ 			method: "POST",
+ 			headers: {
+diff --git a/packages/coding-agent/src/modes/print-mode.ts b/packages/coding-agent/src/modes/print-mode.ts
+index 84c0f9b..0f93ed7 100644
+--- a/packages/coding-agent/src/modes/print-mode.ts
++++ b/packages/coding-agent/src/modes/print-mode.ts
+@@ -37,6 +37,26 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
+ 	let unsubscribe: (() => void) | undefined;
+ 	let unsubscribeBackpressure: (() => void) | undefined;
+ 	let disposing: Promise<void> | undefined;
++
++	// `reef exec --list-tools`: print the loadout a real run would use, then stop. No model call.
++	if (process.env.REEF_PRINT_LOADOUT === "1") {
++		const session = runtimeHost.session;
++		const facts = session.getHarnessFacts();
++		// Before any request there is no measured budget, so estimate the prompt we would send.
++		const estimated = facts?.promptTokens ?? Math.ceil(session.systemPrompt.length / 3.6);
++		const payload =
++			mode === "json"
++				? JSON.stringify({
++						tools: session.getActiveToolNames(),
++						prompt_tokens: estimated,
++						declared: facts?.declaredTools ?? session.getActiveToolNames().length,
++					})
++				: session.getActiveToolNames().join("\n");
++		process.stdout.write(`${payload}\n`);
++		await runtimeHost.dispose();
++		return 0;
++	}
++
+ 	// SIGTERM/SIGHUP received so far. Only a repeated signal forces exit during disposal.
+ 	let signalCount = 0;
+ 	const signalCleanupHandlers: Array<() => void> = [];
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-contract.test.ts b/packages/coding-agent/src/modes/rpc/rpc-contract.test.ts
+new file mode 100644
+index 0000000..1ea96c3
+--- /dev/null
++++ b/packages/coding-agent/src/modes/rpc/rpc-contract.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, it } from "vitest";
++import { RPC_COMMANDS, RPC_PROTOCOL_VERSION } from "./rpc-types.ts";
++
++describe("RPC contract", () => {
++	it("has a version to negotiate with", () => {
++		expect(RPC_PROTOCOL_VERSION).toBe(1);
++	});
++
++	it("documents the commands a client is expected to send", () => {
++		// A client that cannot see a command here will not try it, so a missing entry is a feature
++		// that does not exist as far as an editor is concerned.
++		for (const name of ["prompt", "abort", "get_state", "set_model", "get_session_stats", "bash"]) {
++			expect(RPC_COMMANDS[name]).toBeDefined();
++		}
++	});
++
++	it("gives every command a required-field list", () => {
++		for (const [name, entry] of Object.entries(RPC_COMMANDS)) {
++			expect(Array.isArray(entry.required), name).toBe(true);
++			expect(entry.reply === "response" || entry.reply === "events", name).toBe(true);
++		}
++	});
++
++	it("prompt really needs a message", () => {
++		expect(RPC_COMMANDS.prompt?.required).toContain("message");
++	});
++});
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-mode.ts b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+index afd8267..4a14a76 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-mode.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+@@ -26,6 +26,7 @@ import {
+ 	writeRawStdout,
+ } from "../../core/output-guard.ts";
+ import { killTrackedDetachedChildren } from "../../utils/shell.ts";
++import { APP_NAME, VERSION } from "../../config.ts";
+ import { type Theme, theme } from "../interactive/theme/theme.ts";
+ import { toJsonEvent } from "../json-event.ts";
+ import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
+@@ -39,6 +40,8 @@ import type {
+ } from "./rpc-types.ts";
+ 
+ // Re-export types for consumers
++import { RPC_PROTOCOL_VERSION, type RpcReadyEvent } from "./rpc-types.ts";
++export { RPC_COMMANDS, RPC_PROTOCOL_VERSION, type RpcReadyEvent } from "./rpc-types.ts";
+ export type {
+ 	RpcCommand,
+ 	RpcExtensionUIRequest,
+@@ -61,6 +64,15 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
+ 		writeRawStdout(serializeJsonLine(obj));
+ 	};
+ 
++	// Handshake first: a client waits for this before writing, so a version mismatch is a clean
++	// refusal rather than a mystery later.
++	output({
++		type: "ready",
++		protocol: RPC_PROTOCOL_VERSION,
++		app: APP_NAME,
++		version: VERSION,
++	} satisfies RpcReadyEvent);
++
+ 	const success = <T extends RpcCommand["type"]>(
+ 		id: string | undefined,
+ 		command: T,
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-types.ts b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+index 7fc7151..622e2f6 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-types.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+@@ -13,6 +13,54 @@ import type { CompactionResult } from "../../core/compaction/index.ts";
+ import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
+ import type { SourceInfo } from "../../core/source-info.ts";
+ 
++/**
++ * The protocol version. Bump when a command, response, or event changes shape in a way that would
++ * break an existing client. Additive changes do not need a bump; removals and renames do.
++ */
++export const RPC_PROTOCOL_VERSION = 1;
++
++/**
++ * The handshake, emitted once when the server is ready for commands. A client that does not see this
++ * line before its first command should give up rather than write into a pipe nobody is reading.
++ */
++export interface RpcReadyEvent {
++	type: "ready";
++	protocol: number;
++	app: string;
++	version: string;
++}
++
++/**
++ * What a client may send, in the form an editor's completion or a validator wants it: command name to
++ * required fields. Kept beside the union so the two are read together; `rpc-contract.test.ts` fails
++ * when a command is added to one and not the other.
++ */
++export const RPC_COMMANDS: Record<string, { required: readonly string[]; reply: "response" | "events" }> = {
++	prompt: { required: ["message"], reply: "response" },
++	steer: { required: ["message"], reply: "response" },
++	follow_up: { required: ["message"], reply: "response" },
++	abort: { required: [], reply: "response" },
++	clear_queue: { required: [], reply: "response" },
++	new_session: { required: [], reply: "response" },
++	get_state: { required: [], reply: "response" },
++	set_model: { required: ["provider", "modelId"], reply: "response" },
++	cycle_model: { required: [], reply: "response" },
++	get_available_models: { required: [], reply: "response" },
++	set_thinking_level: { required: ["level"], reply: "response" },
++	cycle_thinking_level: { required: [], reply: "response" },
++	get_available_thinking_levels: { required: [], reply: "response" },
++	set_steering_mode: { required: ["mode"], reply: "response" },
++	set_follow_up_mode: { required: ["mode"], reply: "response" },
++	compact: { required: [], reply: "response" },
++	set_auto_compaction: { required: ["enabled"], reply: "response" },
++	set_auto_retry: { required: ["enabled"], reply: "response" },
++	abort_retry: { required: [], reply: "response" },
++	bash: { required: ["command"], reply: "response" },
++	abort_bash: { required: [], reply: "response" },
++	get_session_stats: { required: [], reply: "response" },
++	export_html: { required: [], reply: "response" },
++};
++
+ // ============================================================================
+ // RPC Commands (stdin)
+ // ============================================================================
 diff --git a/packages/coding-agent/src/package-manager-cli.ts b/packages/coding-agent/src/package-manager-cli.ts
 index 93a8fd4..0cb3444 100644
 --- a/packages/coding-agent/src/package-manager-cli.ts

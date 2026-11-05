@@ -1,0 +1,60 @@
+{
+	"suite": "real",
+	"note": "Multi-step tasks with a verifiable end state. Graded on the final files and the reported answer, not on style.",
+	"scenarios": [
+		{
+			"id": "add-field",
+			"task": "Add a `retentionDays` field set to 90 to config.json, keeping the file valid JSON and the existing fields intact. Then say what you changed.",
+			"expect": {
+				"contains": [
+					"retentionDays"
+				],
+				"json": {
+					"path": "config.json",
+					"field": "retentionDays",
+					"value": 90
+				}
+			}
+		},
+		{
+			"id": "fix-reader",
+			"task": "Make reader.js reject paths outside the current directory before reading. Keep the exported function name. Then say what you changed in one sentence.",
+			"expect": {
+				"contains": [
+					"reader.js"
+				],
+				"file_contains": {
+					"path": "reader.js",
+					"any": [
+						"resolve",
+						"relative",
+						"startsWith",
+						"normalize"
+					]
+				}
+			}
+		},
+		{
+			"id": "policy-rule",
+			"task": "Add a rule to .reef/permissions.json that blocks any command containing `curl`. Then report whether the file validates.",
+			"expect": {
+				"contains": [
+					"curl"
+				],
+				"json_path": ".reef/permissions.json"
+			}
+		},
+		{
+			"id": "report-tree",
+			"task": "For every `.js` file here, state its exported function. One line per file, no preamble.",
+			"expect": {
+				"contains": [
+					"reader.js",
+					"session-store.js",
+					"writeSessionEntry",
+					"read"
+				]
+			}
+		}
+	]
+}

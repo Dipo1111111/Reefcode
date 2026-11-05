@@ -30,6 +30,8 @@ import { resolveCredentialForPrint } from "./cli/credential-print.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
+import { runExecCommand } from "./cli/exec-command.ts";
+import { runSearchCommand } from "./cli/search-command.ts";
 import { runPermissionsCommand } from "./cli/permissions-command.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
@@ -584,6 +586,18 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (await runAuthCommand(args)) {
+		return;
+	}
+
+	const search = runSearchCommand(args);
+	if (search.handled) {
+		process.exitCode = search.exitCode ?? 0;
+		return;
+	}
+
+	const exec = await runExecCommand(args);
+	if (exec.handled) {
+		process.exitCode = exec.exitCode ?? 0;
 		return;
 	}
 

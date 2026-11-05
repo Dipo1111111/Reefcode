@@ -10,7 +10,9 @@
  */
 
 import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types.ts";
+import { formatDuration, listJobs } from "../codemode/jobs.ts";
 import { TASK_ENTRY_TYPE as REEF_TASK_ENTRY_TYPE } from "../tasks/index.ts";
+import { SECTION_BUDGETS } from "../../core/request-audit.ts";
 
 /** Session custom-entry type holding one model call's usage. */
 export const REEF_REQUEST_ENTRY_TYPE = "reef-request";
@@ -132,6 +134,50 @@ export function createReefStatsExtension(): ExtensionFactory {
 				}
 				const budget = ctx.getSectionBudget();
 				if (budget) lines.push("", `total prompt: ${budget.tokens} tokens`);
+				ctx.ui?.notify?.(lines.join("\n"));
+			},
+		});
+
+		pi.registerCommand("context", {
+			description: "What the next request will contain, section by section",
+			handler: async (_args: string, ctx) => {
+				const budget = ctx.getSectionBudget();
+				if (!budget) {
+					ctx.ui?.notify?.("No request yet. The budget is measured when the first one is built.");
+					return;
+				}
+				const rows = Object.entries(budget.sections).map(([name, text]) => {
+					const tokens = Math.ceil(text.length / 3.6);
+					const limit = SECTION_BUDGETS[name];
+					const mark = limit && tokens > limit.target ? (tokens > limit.cap ? " !!" : " !") : "";
+					return `${name.padEnd(16)} ${String(tokens).padStart(6)}${limit ? ` / ${limit.target}` : ""}${mark}`;
+				});
+				const truncated = budget.truncated.length
+					? ["", "Truncated:", ...budget.truncated.map((entry) => `  ${entry.name}: kept ${entry.kept} lines, dropped ${entry.dropped}`)]
+					: [];
+				const audit = ctx.getRequestAudits().at(-1);
+				const contract = audit
+					? ["", `Append-only: ${audit.appendOnly ? "yes" : `no (${audit.breakReason ?? "unexpected"})`}`, `Cacheable prefix: ${audit.cacheablePrefixTokens} tokens`]
+					: [];
+				ctx.ui?.notify?.([...rows, "", `total ${budget.tokens} tokens`, ...truncated, ...contract].join("\n"));
+			},
+		});
+
+		pi.registerCommand("jobs", {
+			description: "Background scripts and subagents in this session",
+			handler: async (_args: string, ctx) => {
+				const jobs = listJobs();
+				if (jobs.length === 0) {
+					ctx.ui?.notify?.("No background jobs. A script with `// @script: startInBackground` keeps running after it returns.");
+					return;
+				}
+				const lines = jobs.map((job) => {
+					const ms = (job.finishedAt ?? Date.now()) - job.startedAt;
+					const calls = job.calls ? ` · ${job.calls} call${job.calls === 1 ? "" : "s"}` : "";
+					return `${job.id.padEnd(18)} ${job.status.padEnd(12)} ${formatDuration(ms)}${calls}`;
+				});
+				const running = jobs.filter((job) => job.status === "running").length;
+				lines.push("", `${running} running · ${jobs.length} total`);
 				ctx.ui?.notify?.(lines.join("\n"));
 			},
 		});

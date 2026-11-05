@@ -508,6 +508,21 @@ export class AgentSession {
 	private readonly _requestAuditor = new RequestAuditor();
 	private _lastBudget: BudgetResult | undefined;
 	private _lastAudit: RequestAudit | undefined;
+
+	/**
+	 * What the TUI footer shows about the harness itself: the declared surface and what it costs.
+	 * Undefined before the first request, which is honest — there is nothing measured yet.
+	 */
+	getHarnessFacts(): { declaredTools: number; promptTokens: number; requestCount: number } | undefined {
+		const budget = this._lastBudget;
+		if (!budget) return undefined;
+		return {
+			declaredTools: this.agent.state.tools.length,
+			// The whole request: sections, plus what the tool block costs, measured on the last one.
+			promptTokens: this._lastAudit?.tokens ?? budget.tokens,
+			requestCount: this._requestAuditor.history.length,
+		};
+	}
 	/** A cache break that is expected to happen on the next request, and why. */
 	private _pendingCacheBreak: CacheBreak | undefined;
 

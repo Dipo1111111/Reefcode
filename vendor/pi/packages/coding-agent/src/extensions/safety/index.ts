@@ -8,7 +8,8 @@
  * reason, so the next attempt can be a better one.
  */
 
-import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types.ts";
+import type { ExtensionAPI, ExtensionFactory, ExtensionUIContext } from "../../core/extensions/types.ts";
+import { ApprovalBatcher, describeBatch } from "./approvals.ts";
 import { SETTINGS_DEFAULTS } from "../../core/settings-defaults.ts";
 import { type LoadedPolicy, loadPolicy } from "./policy.ts";
 import { checkRules } from "./rules.ts";
@@ -89,8 +90,21 @@ export function createSafetyExtension(options: SafetyOptions = {}): ExtensionFac
 
 		/** Commands the user approved in this session, so the same ask is not shown twice. */
 		const approved = new Set<string>();
+		// One dialog per batch, not per call: six prompts in a row teaches people to press yes.
+		// The dialog belongs to the call that raised it, so the handler records the UI first.
+		let activeUI: ExtensionUIContext | undefined;
+		const batcher = new ApprovalBatcher({
+			confirm: async (requests) => {
+				if (!activeUI) return false;
+				const { title, body } = describeBatch(requests);
+				const ok = await activeUI.confirm(title, body);
+				if (ok) for (const request of requests) approved.add(request.tool + "\u0000" + request.summary);
+				return ok;
+			},
+		});
 
 		pi.on("tool_call", async (event, ctx) => {
+			activeUI = ctx.ui;
 			const tier = options.tier ?? readTier(pi);
 			const context: Context = {
 				cwd: ctx.cwd,
@@ -106,19 +120,12 @@ export function createSafetyExtension(options: SafetyOptions = {}): ExtensionFac
 			const verdict = decideWithPolicy(call, context, current(ctx.cwd).rules);
 			if (verdict.decision === "allow") return;
 			if (verdict.decision === "ask" && !context.headless && ctx.ui) {
-				// Interactive: ask, once per distinct command per session. A batch of identical asks is
-				// noise, not diligence.
+				// Interactive: ask once per distinct call per session, and once per batch rather than
+				// once per call. A repeated ask is noise, not diligence.
 				const key = `${call.tool}\u0000${summarize(call)}`;
-				if (!approved.has(key)) {
-					const ok = await ctx.ui.confirm(
-						`Allow this ${call.tool} call?`,
-						`${summarize(call)}\n\n${verdict.reason}`,
-					);
-					if (!ok) {
-						return { block: true, reason: `policy_denied: ${verdict.reason}` };
-					}
-					approved.add(key);
-				}
+				if (approved.has(key)) return;
+				const allowed = await batcher.ask({ tool: call.tool, summary: summarize(call), reason: verdict.reason });
+				if (!allowed) return { block: true, reason: `policy_denied: ${verdict.reason}` };
 				return;
 			}
 			const label = verdict.ruleId ? `policy_block (${verdict.ruleId})` : "policy_block";

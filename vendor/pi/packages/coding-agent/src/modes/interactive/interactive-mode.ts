@@ -151,7 +151,8 @@ import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
-import { FooterComponent, formatTokens } from "./components/footer.ts";
+import { FooterComponent, formatTokens, type ReefFooterFacts } from "./components/footer.ts";
+import { listJobs } from "../../extensions/codemode/jobs.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { createMarkdownTransform } from "./components/markdown-transform.ts";
@@ -373,7 +374,7 @@ type LoginProviderCompletionOption = {
 	subscription?: boolean;
 };
 
-const RADIUS_LOGIN_INTRO = "Radius is a service crafted for Pi by the builders of Pi, Earendil Works";
+const RADIUS_LOGIN_INTRO = "Radius is a third-party service, not part of REEF";
 
 const AUTH_TYPE_ORDER = { oauth: 0, api_key: 1 } satisfies Record<AuthSelectorProvider["authType"], number>;
 
@@ -481,6 +482,27 @@ export class InteractiveMode {
 	private activeSelectorToken?: object;
 	private activeSelectorDispose?: () => void;
 	private footer: FooterComponent;
+	/** Last value handed to the footer, so a frame that changes nothing does not repaint. */
+	private lastReefFacts = "";
+
+	/**
+	 * REEF's own footer numbers: the declared tool surface, the request it costs, the safety tier,
+	 * and how many background jobs are running. Recomputed cheaply and only re-rendered on change.
+	 */
+	private refreshReefFacts(): void {
+		const countRunningJobs = () => listJobs().filter((job) => job.status === "running").length;
+		const facts = this.session.getHarnessFacts();
+		const tier = this.settingsManager.getSettings().safety?.tier ?? "medium";
+		const jobs = countRunningJobs();
+		const next: ReefFooterFacts | undefined = facts
+			? { declaredTools: facts.declaredTools, promptTokens: facts.promptTokens, tier, jobs }
+			: undefined;
+		const key = next ? `${next.declaredTools}:${next.promptTokens}:${next.tier}:${next.jobs}` : "none";
+		if (key === this.lastReefFacts) return;
+		this.lastReefFacts = key;
+		this.footer.setReefFacts(next);
+		this.ui.requestRender();
+	}
 	private footerContainer: Container;
 	private footerDataProvider: FooterDataProvider;
 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
@@ -1034,7 +1056,7 @@ export class InteractiveMode {
 			const showDetails = this.shouldShowStartupDetails();
 			// Built on demand so the header follows theme changes. The logo's first line carries the version,
 			// its second line the first line of key hints. Terminals that cannot render the logo get a
-			// "Pi vX" line instead, with the key hints below it.
+			// "REEF vX" line instead, with the key hints below it.
 			const showLogo = supportsReefLogo();
 			const withLogo = (hints: string) => {
 				if (!showLogo) return `${reefWordmark()} ${theme.fg("dim", `v${this.version}`)}\n${hints}`;
@@ -1084,7 +1106,10 @@ export class InteractiveMode {
 					`Press ${keyText("app.tools.expand")} to show full startup help${showDetails ? " and loaded resources" : ""}.`,
 				);
 			const onboarding = () =>
-				theme.fg("dim", `Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`);
+				theme.fg(
+					"dim",
+					`Ask it to explain its own tools, or type /help. /doctor checks the install, /cost shows what it spent.`,
+				);
 			const header = new BuiltInHeader(
 				() => `${withLogo(compactInstructions())}\n${compactOnboarding()}\n\n${onboarding()}`,
 				() => `${withLogo(expandedInstructions())}\n\n${onboarding()}`,
@@ -1196,7 +1221,7 @@ export class InteractiveMode {
 			})
 			.finally(() => {
 				// On Windows, npm can overwrite the shared console title while checking
-				// extension package versions. Restore Pi's title after the startup check.
+				// extension package versions. Restore the title after the startup check.
 				if (process.platform === "win32" && this.isInitialized) {
 					this.updateTerminalTitle();
 				}
@@ -1344,7 +1369,7 @@ export class InteractiveMode {
 		}
 
 		if (extendedKeysFormat === "xterm") {
-			return "tmux extended-keys-format is xterm. Pi works best with csi-u. Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux.";
+			return "tmux extended-keys-format is xterm. REEF works best with csi-u. Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux.";
 		}
 
 		return undefined;
@@ -1426,7 +1451,7 @@ export class InteractiveMode {
 			if (newEntries.length > 0) {
 				this.settingsManager.setExtensionChangelogVersion(key, pkg.version);
 				const name = pkg.name || sourceInfo.source;
-				// Prefix each "## [x.y.z]" heading with the package name so entries render like Pi's own.
+				// Prefix each "## [x.y.z]" heading with the package name so entries render like REEF's own.
 				const markdown = newEntries
 					.map((entry) => entry.content.replace(/^##\s+/, `## ${name} `))
 					.join("\n\n")
@@ -2179,6 +2204,7 @@ export class InteractiveMode {
 		}
 		this.footer.setSession(this.session);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
+		this.refreshReefFacts();
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.outputPad = this.settingsManager.getOutputPad();
@@ -3724,6 +3750,8 @@ export class InteractiveMode {
 
 			case "tool_execution_end": {
 				if (event.isError) this.maybeShowInstallChangeWarning();
+				// A job that started or finished changes the footer's job count.
+				this.refreshReefFacts();
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError, durationMs: event.durationMs });
@@ -3734,6 +3762,8 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
+				// The first request of a session is what establishes the prompt cost in the footer.
+				this.refreshReefFacts();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -4451,6 +4481,13 @@ export class InteractiveMode {
 		this.stop();
 		await this.runtimeHost.dispose();
 
+		const summary = this.session.getHarnessFacts();
+		if (summary) {
+			// One line, not a report: what this session cost to run and how wide the tool surface was.
+			process.stdout.write(
+				`${chalk.dim("Session:")} ${summary.requestCount ?? 0} request(s) · ~${summary.promptTokens} tok prompt · ${summary.declaredTools} declared tool(s)\n`,
+			);
+		}
 		const resumeCommand = formatResumeCommand(this.sessionManager);
 		if (resumeCommand) {
 			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);

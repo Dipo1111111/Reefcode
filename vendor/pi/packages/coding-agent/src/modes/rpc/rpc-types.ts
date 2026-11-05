@@ -13,6 +13,54 @@ import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 
+/**
+ * The protocol version. Bump when a command, response, or event changes shape in a way that would
+ * break an existing client. Additive changes do not need a bump; removals and renames do.
+ */
+export const RPC_PROTOCOL_VERSION = 1;
+
+/**
+ * The handshake, emitted once when the server is ready for commands. A client that does not see this
+ * line before its first command should give up rather than write into a pipe nobody is reading.
+ */
+export interface RpcReadyEvent {
+	type: "ready";
+	protocol: number;
+	app: string;
+	version: string;
+}
+
+/**
+ * What a client may send, in the form an editor's completion or a validator wants it: command name to
+ * required fields. Kept beside the union so the two are read together; `rpc-contract.test.ts` fails
+ * when a command is added to one and not the other.
+ */
+export const RPC_COMMANDS: Record<string, { required: readonly string[]; reply: "response" | "events" }> = {
+	prompt: { required: ["message"], reply: "response" },
+	steer: { required: ["message"], reply: "response" },
+	follow_up: { required: ["message"], reply: "response" },
+	abort: { required: [], reply: "response" },
+	clear_queue: { required: [], reply: "response" },
+	new_session: { required: [], reply: "response" },
+	get_state: { required: [], reply: "response" },
+	set_model: { required: ["provider", "modelId"], reply: "response" },
+	cycle_model: { required: [], reply: "response" },
+	get_available_models: { required: [], reply: "response" },
+	set_thinking_level: { required: ["level"], reply: "response" },
+	cycle_thinking_level: { required: [], reply: "response" },
+	get_available_thinking_levels: { required: [], reply: "response" },
+	set_steering_mode: { required: ["mode"], reply: "response" },
+	set_follow_up_mode: { required: ["mode"], reply: "response" },
+	compact: { required: [], reply: "response" },
+	set_auto_compaction: { required: ["enabled"], reply: "response" },
+	set_auto_retry: { required: ["enabled"], reply: "response" },
+	abort_retry: { required: [], reply: "response" },
+	bash: { required: ["command"], reply: "response" },
+	abort_bash: { required: [], reply: "response" },
+	get_session_stats: { required: [], reply: "response" },
+	export_html: { required: [], reply: "response" },
+};
+
 // ============================================================================
 // RPC Commands (stdin)
 // ============================================================================

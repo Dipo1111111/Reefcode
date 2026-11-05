@@ -58,6 +58,9 @@ export const SETTINGS_DEFAULTS = {
 		mode: "on",
 		inlineBudget: 3000,
 	},
+	script: {
+		enabled: true,
+	},
 	safety: {
 		tier: "medium",
 		skipApprovals: false,

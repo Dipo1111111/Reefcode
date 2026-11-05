@@ -4,6 +4,7 @@ import llamaExtension from "./llama/index.ts";
 import mcpExtension from "./mcp/index.ts";
 import safetyExtension from "./safety/index.ts";
 import reefStatsExtension from "./reef-stats/index.ts";
+import doctorExtension from "./doctor/index.ts";
 import tasksExtension from "./tasks/index.ts";
 import toolSearchExtension from "./tool-search/index.ts";
 
@@ -18,4 +19,5 @@ export const builtInExtensions: InlineExtension[] = [
 	{ name: "safety", factory: safetyExtension, builtin: true },
 	{ name: "reef-stats", factory: reefStatsExtension, builtin: true },
 	{ name: "tasks", factory: tasksExtension, builtin: true },
+	{ name: "doctor", factory: doctorExtension, builtin: true },
 ];

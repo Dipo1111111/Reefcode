@@ -26,6 +26,7 @@ import {
 	writeRawStdout,
 } from "../../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
+import { APP_NAME, VERSION } from "../../config.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
 import { toJsonEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -39,6 +40,8 @@ import type {
 } from "./rpc-types.ts";
 
 // Re-export types for consumers
+import { RPC_PROTOCOL_VERSION, type RpcReadyEvent } from "./rpc-types.ts";
+export { RPC_COMMANDS, RPC_PROTOCOL_VERSION, type RpcReadyEvent } from "./rpc-types.ts";
 export type {
 	RpcCommand,
 	RpcExtensionUIRequest,
@@ -60,6 +63,15 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		writeRawStdout(serializeJsonLine(obj));
 	};
+
+	// Handshake first: a client waits for this before writing, so a version mismatch is a clean
+	// refusal rather than a mystery later.
+	output({
+		type: "ready",
+		protocol: RPC_PROTOCOL_VERSION,
+		app: APP_NAME,
+		version: VERSION,
+	} satisfies RpcReadyEvent);
 
 	const success = <T extends RpcCommand["type"]>(
 		id: string | undefined,

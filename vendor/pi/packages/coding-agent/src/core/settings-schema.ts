@@ -151,6 +151,19 @@ function codemodeMode(options?: TSchemaOptions) {
 
 const CodemodeModeSchema = codemodeMode();
 
+/**
+ * The one escape hatch (ADR-014). There is no per-model tuning: if the script engine ever makes a
+ * model worse, turning it off is the supported answer, and it is global rather than per model.
+ */
+const ScriptSettingsSchema = Type.Object({
+	enabled: Type.Optional(
+		Type.Boolean({
+			description: "Declare script and wait_for_script to the model. When false, tools are declared directly.",
+			default: SETTINGS_DEFAULTS.script.enabled,
+		}),
+	),
+});
+
 const CodemodeSettingsSchema = Type.Object({
 	mode: Type.Optional(
 		codemodeMode({
@@ -414,6 +427,7 @@ export const SettingsSchema = Type.Object(
 		markdown: Type.Optional(MarkdownSettingsSchema),
 		warnings: Type.Optional(WarningSettingsSchema),
 		codemode: Type.Optional(CodemodeSettingsSchema),
+		script: Type.Optional(ScriptSettingsSchema),
 		safety: Type.Optional(SafetySettingsSchema),
 		sessionDir: Type.Optional(
 			Type.String({
@@ -497,6 +511,7 @@ export interface MarkdownSettings extends Static<typeof MarkdownSettingsSchema> 
 export interface WarningSettings extends Static<typeof WarningSettingsSchema> {}
 export type CodemodeMode = Static<typeof CodemodeModeSchema>;
 export interface CodemodeSettings extends Static<typeof CodemodeSettingsSchema> {}
+export interface ScriptSettings extends Static<typeof ScriptSettingsSchema> {}
 export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust"]>;
 export type QuietStartup = NonNullable<SettingsInput["quietStartup"]>;
 export type TransportSetting = NonNullable<SettingsInput["transport"]>;

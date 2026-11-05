@@ -26,6 +26,33 @@ function readMode(pi: ExtensionAPI): CodemodeMode {
 	return pi.getSettings().codemode?.mode === "only" ? "only" : SETTINGS_DEFAULTS.codemode.mode;
 }
 
+/**
+ * `script.enabled` (ADR-014) or `REEF_SCRIPT=off`. When off, the script tools are not declared and
+ * every tool is declared directly, which is the direct-tool baseline the evals measure against.
+ */
+function readEnvEnabled(): boolean | undefined {
+	const env = process.env.REEF_SCRIPT?.trim().toLowerCase();
+	if (env === undefined || env === "") return undefined;
+	return !(env === "off" || env === "false" || env === "0");
+}
+
+/**
+ * Settings are not readable while extensions load, so this is asked again once the session starts.
+ * Before that, the environment decides; the default is on.
+ */
+function readEnabled(pi: ExtensionAPI): boolean {
+	const fromEnv = readEnvEnabled();
+	if (fromEnv !== undefined) return fromEnv;
+	try {
+		return pi.getSettings().script?.enabled !== false;
+	} catch {
+		return true;
+	}
+}
+
+/** Direct tools declared instead of `script` when the engine is off. */
+const DIRECT_TOOLS = ["read", "bash", "edit", "write"];
+
 function readInlineBudget(pi: ExtensionAPI): number | undefined {
 	const budget = pi.getSettings().codemode?.inlineBudget;
 	return typeof budget === "number" && Number.isFinite(budget) && budget >= 0 ? budget : undefined;
@@ -33,6 +60,7 @@ function readInlineBudget(pi: ExtensionAPI): number | undefined {
 
 export function createCodemodeExtension(options: CodemodeExtensionOptions = {}): ExtensionFactory {
 	return (pi) => {
+		const enabled = readEnabled(pi);
 		// A job that was running when the process ended can never finish. Say so once per session
 		// start instead of leaving a row that looks alive forever.
 		pi.on("session_start", async (event) => {
@@ -40,6 +68,14 @@ export function createCodemodeExtension(options: CodemodeExtensionOptions = {}):
 			for (const entry of markInterrupted()) {
 				pi.appendEntry(SCRIPT_JOB_ENTRY_TYPE, entry);
 			}
+			return undefined;
+		});
+
+		pi.on("session_start", async () => {
+			if (readEnabled(pi)) return undefined;
+			// Engine off: show the tools themselves. `script` is left registered but undeclared, so
+			// `--tools script` still works and nothing changes for a session that asks for it.
+			pi.setActiveTools([...new Set([...pi.getActiveTools().filter((name) => name !== "script" && name !== "wait_for_script"), ...DIRECT_TOOLS])]);
 			return undefined;
 		});
 
@@ -53,13 +89,14 @@ export function createCodemodeExtension(options: CodemodeExtensionOptions = {}):
 					new Map(pi.getAllTools().map((tool) => [tool.name, tool.promptGuidelines ?? []] as const)),
 				getMode: () => options.mode ?? readMode(pi),
 				getInlineBudget: () => options.inlineBudget ?? readInlineBudget(pi),
+				getEnabled: () => enabled,
 			}),
-			defaultActive: true,
+			defaultActive: enabled,
 		});
 		// `wait_for_script` is the declared partner of `script` and ships with it.
 		pi.registerTool({
 			...createWaitForScriptToolDefinition(),
-			defaultActive: true,
+			defaultActive: enabled,
 		});
 	};
 }

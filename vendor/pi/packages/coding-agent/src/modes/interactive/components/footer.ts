@@ -59,11 +59,29 @@ interface SessionStats {
  * Footer component that shows pwd, token stats, and context usage.
  * Computes token/context stats from session, gets git branch and extension statuses from provider.
  */
+/**
+ * REEF: what the harness is spending before it does anything. `tools 2` is the declared surface and
+ * `~1.6k` the request it costs; `med` is the safety tier. They are the two numbers a REEF user tunes,
+ * so they belong in the footer rather than behind a command.
+ */
+export interface ReefFooterFacts {
+	declaredTools: number;
+	promptTokens: number;
+	tier: string;
+	jobs: number;
+}
+
 export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
 	private sessionStats?: SessionStats;
+	/** Supplied by interactive-mode from the request audit and the job registry. */
+	private reefFacts?: ReefFooterFacts;
+
+	setReefFacts(facts: ReefFooterFacts | undefined): void {
+		this.reefFacts = facts;
+	}
 
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
@@ -210,6 +228,13 @@ export class FooterComponent implements Component {
 			contextPercentStr = contextPercentDisplay;
 		}
 		statsParts.push(contextPercentStr);
+		if (this.reefFacts) {
+			const { declaredTools, promptTokens, tier, jobs } = this.reefFacts;
+			// Dim, because these are budget facts rather than usage: nothing here moves on its own.
+			statsParts.push(theme.fg("dim", `⚙${declaredTools} ~${formatTokens(promptTokens)}`));
+			statsParts.push(theme.fg(tier === "none" ? "warning" : "dim", tier));
+			if (jobs > 0) statsParts.push(theme.fg("dim", `⧗${jobs}`));
+		}
 		if (areExperimentalFeaturesEnabled()) {
 			statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
 		}
