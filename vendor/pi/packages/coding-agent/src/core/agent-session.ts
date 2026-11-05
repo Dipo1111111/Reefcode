@@ -147,6 +147,7 @@ import {
 	type SettingsManager,
 } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
+import { isToolReachable } from "./tool-reachability.ts";
 import { BUILTIN_PATH_PREFIX, createSyntheticSourceInfo, isSyntheticPath, type SourceInfo } from "./source-info.ts";
 import {
 	buildSystemPrompt,
@@ -1665,18 +1666,30 @@ export class AgentSession {
 	 * `codemode` or `deferred` tool.
 	 */
 	private _getCallableTools(active: ReadonlySet<string> = new Set(this.getActiveToolNames())): AgentTool[] {
-		// With the script engine on, every registered direct tool is reachable from a script even
-		// when its own declaration is hidden. Without this, hiding a declaration would also remove
-		// the tool from scripts, which is the opposite of the point.
-		const scriptActive = active.has("script") || this._hiddenDeclarations.has("read");
-		return [...this._toolRegistry.values()].filter((tool) => {
-			const exposure = this._getToolExposure(tool.name);
-			if (exposure === "hidden") return false;
-			if (this._hiddenDeclarations.has(tool.name)) return true;
-			if (exposure === "codemode" || exposure === "deferred") return true;
-			if (exposure === "direct") return active.has(tool.name) || scriptActive;
-			return false;
-		});
+		// A direct tool stays reachable from a script when it is active, or when its declaration was
+		// hidden while it stayed active — otherwise hiding a declaration would remove the tool from
+		// scripts, which is the opposite of the point.
+		//
+		// It must NOT be "every registered tool while a script is active". That made `powershell`
+		// callable on macOS, where it cannot run, and put every registered-but-inactive tool (the
+		// task tools, `tool_search`, tools of disabled extensions) behind `tools.<name>` where the
+		// activation rules do not apply. The model then spends a turn on `tools.shell` and is told
+		// `powershell` is close, which is worse than being told nothing.
+		//
+		// The pool is therefore: active, or deliberately hidden-while-active, or one the session would
+		// activate by default. `defaultActive: false` means "only when named", and those are excluded.
+		const defaults = this.settingsManager?.getDefaultTools() ?? DEFAULT_TOOL_NAMES;
+		return [...this._toolRegistry.values()].filter((tool) =>
+			isToolReachable({
+				name: tool.name,
+				exposure: this._getToolExposure(tool.name),
+				active,
+				hiddenWhileActive: this._hiddenDeclarations,
+				allowed: this._isAllowedTool(tool.name),
+				defaultActive: this._toolDefinitions.get(tool.name)?.definition.defaultActive,
+				defaults,
+			}),
+		);
 	}
 
 	/**

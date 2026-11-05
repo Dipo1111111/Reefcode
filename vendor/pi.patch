@@ -1168,7 +1168,7 @@ index 5a9552d..2ac0a85 100644
  }
  
 diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
-index a0dda03..bdde7fe 100644
+index a0dda03..7eecafc 100644
 --- a/packages/coding-agent/src/core/agent-session.ts
 +++ b/packages/coding-agent/src/core/agent-session.ts
 @@ -80,6 +80,14 @@ import {
@@ -1186,7 +1186,15 @@ index a0dda03..bdde7fe 100644
  import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
  import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
  import {
-@@ -496,6 +504,56 @@ export class AgentSession {
+@@ -139,6 +147,7 @@ import {
+ 	type SettingsManager,
+ } from "./settings-manager.ts";
+ import type { SlashCommandInfo } from "./slash-commands.ts";
++import { isToolReachable } from "./tool-reachability.ts";
+ import { BUILTIN_PATH_PREFIX, createSyntheticSourceInfo, isSyntheticPath, type SourceInfo } from "./source-info.ts";
+ import {
+ 	buildSystemPrompt,
+@@ -496,6 +505,56 @@ export class AgentSession {
  	private _toolPromptGuidelines: Map<string, string[]> = new Map();
  
  	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
@@ -1243,7 +1251,7 @@ index a0dda03..bdde7fe 100644
  	/** Prompt options after before_agent_start mutations for the active run. */
  	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
  
-@@ -935,6 +993,9 @@ export class AgentSession {
+@@ -935,6 +994,9 @@ export class AgentSession {
  			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
  			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
  			this._runSystemPromptOptions = options;
@@ -1253,26 +1261,42 @@ index a0dda03..bdde7fe 100644
  
  			return {
  				...previousSnapshot,
-@@ -1604,9 +1665,17 @@ export class AgentSession {
+@@ -1604,10 +1666,30 @@ export class AgentSession {
  	 * `codemode` or `deferred` tool.
  	 */
  	private _getCallableTools(active: ReadonlySet<string> = new Set(this.getActiveToolNames())): AgentTool[] {
-+		// With the script engine on, every registered direct tool is reachable from a script even
-+		// when its own declaration is hidden. Without this, hiding a declaration would also remove
-+		// the tool from scripts, which is the opposite of the point.
-+		const scriptActive = active.has("script") || this._hiddenDeclarations.has("read");
- 		return [...this._toolRegistry.values()].filter((tool) => {
- 			const exposure = this._getToolExposure(tool.name);
+-		return [...this._toolRegistry.values()].filter((tool) => {
+-			const exposure = this._getToolExposure(tool.name);
 -			return exposure === "codemode" || exposure === "deferred" || (exposure === "direct" && active.has(tool.name));
-+			if (exposure === "hidden") return false;
-+			if (this._hiddenDeclarations.has(tool.name)) return true;
-+			if (exposure === "codemode" || exposure === "deferred") return true;
-+			if (exposure === "direct") return active.has(tool.name) || scriptActive;
-+			return false;
- 		});
+-		});
++		// A direct tool stays reachable from a script when it is active, or when its declaration was
++		// hidden while it stayed active — otherwise hiding a declaration would remove the tool from
++		// scripts, which is the opposite of the point.
++		//
++		// It must NOT be "every registered tool while a script is active". That made `powershell`
++		// callable on macOS, where it cannot run, and put every registered-but-inactive tool (the
++		// task tools, `tool_search`, tools of disabled extensions) behind `tools.<name>` where the
++		// activation rules do not apply. The model then spends a turn on `tools.shell` and is told
++		// `powershell` is close, which is worse than being told nothing.
++		//
++		// The pool is therefore: active, or deliberately hidden-while-active, or one the session would
++		// activate by default. `defaultActive: false` means "only when named", and those are excluded.
++		const defaults = this.settingsManager?.getDefaultTools() ?? DEFAULT_TOOL_NAMES;
++		return [...this._toolRegistry.values()].filter((tool) =>
++			isToolReachable({
++				name: tool.name,
++				exposure: this._getToolExposure(tool.name),
++				active,
++				hiddenWhileActive: this._hiddenDeclarations,
++				allowed: this._isAllowedTool(tool.name),
++				defaultActive: this._toolDefinitions.get(tool.name)?.definition.defaultActive,
++				defaults,
++			}),
++		);
  	}
  
-@@ -1664,7 +1733,9 @@ export class AgentSession {
+ 	/**
+@@ -1664,7 +1746,9 @@ export class AgentSession {
  			});
  		}
  		this._hiddenDeclarations = hidden;
@@ -1283,7 +1307,7 @@ index a0dda03..bdde7fe 100644
  		return declared;
  	}
  
-@@ -1791,10 +1862,9 @@ export class AgentSession {
+@@ -1791,10 +1875,9 @@ export class AgentSession {
  		options.selectedTools = this._applyToolLoadout(options.selectedTools).map((tool) => tool.name);
  		// The tool list and rules must match the declarations the request carries.
  		options.hiddenTools = [...this._hiddenDeclarations];
@@ -1297,7 +1321,7 @@ index a0dda03..bdde7fe 100644
  		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
  	}
  
-@@ -2002,6 +2072,8 @@ export class AgentSession {
+@@ -2002,6 +2085,8 @@ export class AgentSession {
  		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
  		this._runSystemPromptOptions = result.systemPromptOptions;
  		if (updateMessage) messages.unshift(updateMessage);
@@ -1306,7 +1330,7 @@ index a0dda03..bdde7fe 100644
  		return messages;
  	}
  
-@@ -2887,9 +2959,44 @@ export class AgentSession {
+@@ -2887,9 +2972,44 @@ export class AgentSession {
  	 *
  	 * @param customInstructions Optional instructions for the compaction summary
  	 */
@@ -1351,7 +1375,7 @@ index a0dda03..bdde7fe 100644
  		this._emit({ type: "compaction_start", reason: "manual" });
  		let fromExtension = false;
  		let cancelledByExtension = false;
-@@ -3586,6 +3693,8 @@ export class AgentSession {
+@@ -3586,6 +3706,8 @@ export class AgentSession {
  				},
  				getSystemPrompt: () => this.systemPrompt,
  				getSystemPromptOptions: () => this._baseSystemPromptOptions,
@@ -2199,6 +2223,120 @@ index 2e031e8..5f0a36c 100644
  interface TimingNamespace {
  	timings: Array<{ label: string; ms: number }>;
  	lastTime: number;
+diff --git a/packages/coding-agent/src/core/tool-reachability.test.ts b/packages/coding-agent/src/core/tool-reachability.test.ts
+new file mode 100644
+index 0000000..6dde2fa
+--- /dev/null
++++ b/packages/coding-agent/src/core/tool-reachability.test.ts
+@@ -0,0 +1,56 @@
++import { describe, expect, it } from "vitest";
++import { isToolReachable, type ToolReachability } from "./tool-reachability.ts";
++
++const DEFAULTS = ["read", "bash", "edit", "write"] as const;
++const ACTIVE = new Set(["read", "bash", "edit", "write"]);
++
++function check(overrides: Partial<ToolReachability> = {}): boolean {
++	return isToolReachable({
++		name: "read",
++		exposure: "direct",
++		active: ACTIVE,
++		hiddenWhileActive: new Set(),
++		allowed: true,
++		defaultActive: undefined,
++		defaults: DEFAULTS,
++		...overrides,
++	});
++}
++
++describe("script tool reachability", () => {
++	it("keeps the default tools callable", () => {
++		for (const name of DEFAULTS) expect(check({ name })).toBe(true);
++	});
++
++	it("keeps a tool callable when only its declaration was hidden", () => {
++		// The REEF loadout hides read/bash/edit/write declarations but must not remove them from scripts.
++		const hidden = new Set(DEFAULTS);
++		for (const name of DEFAULTS) expect(check({ name, hiddenWhileActive: hidden })).toBe(true);
++	});
++
++	it("does not make a registered non-default tool callable", () => {
++		// The regression: powershell is registered everywhere, runs only on Windows, and was reaching
++		// scripts on macOS where `tools.shell` then failed with "did you mean powershell?".
++		expect(check({ name: "powershell" })).toBe(false);
++	});
++
++	it("does not make a defaultActive: false tool callable", () => {
++		// task/task_output/task_stop must stay behind explicit activation, even inside a script.
++		expect(check({ name: "task", defaultActive: false })).toBe(false);
++	});
++
++	it("respects the tool allowlist", () => {
++		expect(check({ name: "grep", allowed: false, defaults: [...DEFAULTS, "grep"] })).toBe(false);
++		expect(check({ name: "grep", allowed: true, defaults: [...DEFAULTS, "grep"] })).toBe(true);
++	});
++
++	it("keeps codemode and deferred tools reachable, and drops hidden ones", () => {
++		expect(check({ name: "mcp__srv__tool", exposure: "codemode", active: new Set() })).toBe(true);
++		expect(check({ name: "later", exposure: "deferred", active: new Set() })).toBe(true);
++		expect(check({ name: "gone", exposure: "hidden", active: new Set() })).toBe(false);
++	});
++
++	it("treats a callable tool that is active as reachable without being a default", () => {
++		expect(check({ name: "grep", active: new Set(["grep"]) })).toBe(true);
++	});
++});
+diff --git a/packages/coding-agent/src/core/tool-reachability.ts b/packages/coding-agent/src/core/tool-reachability.ts
+new file mode 100644
+index 0000000..942f02d
+--- /dev/null
++++ b/packages/coding-agent/src/core/tool-reachability.ts
+@@ -0,0 +1,46 @@
++import type { ToolExposure } from "./extensions/types.ts";
++
++/**
++ * Whether a registered tool can be called from a script (`tools.<name>`), used by
++ * `AgentSession._getCallableTools()`.
++ *
++ * The first version said "every registered direct tool while a script is active", which is wrong in
++ * two ways that both showed up in real use:
++ *
++ * - `powershell` is registered on every platform but is not a default tool off Windows. It became
++ *   callable on macOS, where it cannot run; the model asked for `tools.shell`, was told
++ *   `tools.powershell` was close, and spent a turn on it.
++ * - Tools with `defaultActive: false` (the `task` tools) and tools of disabled extensions became
++ *   callable, which bypasses the activation rules: the model could reach a tool the user had not
++ *   enabled.
++ *
++ * The pool is therefore the set the session would actually give the model: active, deliberately
++ * hidden while still active (so hiding a declaration does not remove it from scripts), or a default
++ * tool. `codemode` and `deferred` exposure stay reachable, because being reachable-only is the point
++ * of those exposures.
++ */
++export interface ToolReachability {
++	name: string;
++	exposure: ToolExposure | undefined;
++	/** The tools the session has active for this loadout. */
++	active: ReadonlySet<string>;
++	/** Tools whose declaration was hidden while they stayed active. */
++	hiddenWhileActive: ReadonlySet<string>;
++	/** Whether `--tools`/`--exclude-tools` keep the tool registered. */
++	allowed: boolean;
++	/** `defaultActive` from the tool definition; `false` means "only when named". */
++	defaultActive: boolean | undefined;
++	/** The session's default tool names (`defaultTools` setting, else the built-in list). */
++	defaults: readonly string[];
++}
++
++export function isToolReachable(tool: ToolReachability): boolean {
++	if (tool.exposure === "hidden") return false;
++	if (tool.hiddenWhileActive.has(tool.name)) return true;
++	if (tool.exposure === "codemode" || tool.exposure === "deferred") return true;
++	if (tool.exposure !== "direct") return false;
++	if (tool.active.has(tool.name)) return true;
++	if (!tool.allowed) return false;
++	if (tool.defaultActive === false) return false;
++	return tool.defaults.includes(tool.name);
++}
 diff --git a/packages/coding-agent/src/core/tools/artifacts.ts b/packages/coding-agent/src/core/tools/artifacts.ts
 new file mode 100644
 index 0000000..64360fa
