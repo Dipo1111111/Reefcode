@@ -1,0 +1,39 @@
+{
+  "name": "reef-harness",
+  "version": "0.1.0",
+  "description": "REEF — a coding agent harness. One script, many tool calls.",
+  "type": "module",
+  "bin": {
+    "reef": "bin/reef.js"
+  },
+  "files": [
+    "bin",
+    "dist/bundle",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "piConfig": {
+    "name": "reef",
+    "configDir": ".reef"
+  },
+  "dependencies": {
+    "quickjs-wasi": "3.6.2"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "coding-agent",
+    "agent",
+    "cli",
+    "llm",
+    "programmatic-tool-calling"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reef-harness/reef.git"
+  },
+  "homepage": "https://github.com/reef-harness/reef#readme"
+}

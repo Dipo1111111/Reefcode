@@ -3,3 +3,4 @@ dist/
 *.log
 .artifacts/
 .reef/
+build/
