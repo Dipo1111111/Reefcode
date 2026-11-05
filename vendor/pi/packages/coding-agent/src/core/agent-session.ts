@@ -513,14 +513,23 @@ export class AgentSession {
 	 * What the TUI footer shows about the harness itself: the declared surface and what it costs.
 	 * Undefined before the first request, which is honest — there is nothing measured yet.
 	 */
-	getHarnessFacts(): { declaredTools: number; promptTokens: number; requestCount: number } | undefined {
+	getHarnessFacts():
+		| { declaredTools: number; promptTokens: number; requestCount: number; schemaTokens: number }
+		| undefined {
+		// Before the first request there is no section budget. The declarations are still known, and
+		// what they cost is the number that decides whether the script engine is saving anything.
+		const tools = this.agent.state.tools;
+		const schemaTokens = Math.ceil(JSON.stringify(tools).length / 3.6);
 		const budget = this._lastBudget;
-		if (!budget) return undefined;
+		if (!budget) {
+			return { declaredTools: tools.length, promptTokens: 0, requestCount: 0, schemaTokens };
+		}
 		return {
-			declaredTools: this.agent.state.tools.length,
+			declaredTools: tools.length,
 			// The whole request: sections, plus what the tool block costs, measured on the last one.
 			promptTokens: this._lastAudit?.tokens ?? budget.tokens,
 			requestCount: this._requestAuditor.history.length,
+			schemaTokens,
 		};
 	}
 	/** A cache break that is expected to happen on the next request, and why. */

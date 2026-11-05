@@ -43,12 +43,15 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		const session = runtimeHost.session;
 		const facts = session.getHarnessFacts();
 		// Before any request there is no measured budget, so estimate the prompt we would send.
-		const estimated = facts?.promptTokens ?? Math.ceil(session.systemPrompt.length / 3.6);
+		// `promptTokens` is 0 before the first request, so fall back to measuring the prompt itself.
+		const measured = facts?.promptTokens ?? 0;
+		const estimated = measured > 0 ? measured : Math.ceil(session.systemPrompt.length / 3.6);
 		const payload =
 			mode === "json"
 				? JSON.stringify({
 						tools: session.getActiveToolNames(),
 						prompt_tokens: estimated,
+						schema_tokens: facts?.schemaTokens ?? 0,
 						declared: facts?.declaredTools ?? session.getActiveToolNames().length,
 					})
 				: session.getActiveToolNames().join("\n");

@@ -1168,7 +1168,7 @@ index 5a9552d..2ac0a85 100644
  }
  
 diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
-index a0dda03..0c981df 100644
+index a0dda03..c12f276 100644
 --- a/packages/coding-agent/src/core/agent-session.ts
 +++ b/packages/coding-agent/src/core/agent-session.ts
 @@ -80,6 +80,14 @@ import {
@@ -1186,7 +1186,7 @@ index a0dda03..0c981df 100644
  import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
  import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
  import {
-@@ -496,6 +504,45 @@ export class AgentSession {
+@@ -496,6 +504,54 @@ export class AgentSession {
  	private _toolPromptGuidelines: Map<string, string[]> = new Map();
  
  	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
@@ -1199,14 +1199,23 @@ index a0dda03..0c981df 100644
 +	 * What the TUI footer shows about the harness itself: the declared surface and what it costs.
 +	 * Undefined before the first request, which is honest — there is nothing measured yet.
 +	 */
-+	getHarnessFacts(): { declaredTools: number; promptTokens: number; requestCount: number } | undefined {
++	getHarnessFacts():
++		| { declaredTools: number; promptTokens: number; requestCount: number; schemaTokens: number }
++		| undefined {
++		// Before the first request there is no section budget. The declarations are still known, and
++		// what they cost is the number that decides whether the script engine is saving anything.
++		const tools = this.agent.state.tools;
++		const schemaTokens = Math.ceil(JSON.stringify(tools).length / 3.6);
 +		const budget = this._lastBudget;
-+		if (!budget) return undefined;
++		if (!budget) {
++			return { declaredTools: tools.length, promptTokens: 0, requestCount: 0, schemaTokens };
++		}
 +		return {
-+			declaredTools: this.agent.state.tools.length,
++			declaredTools: tools.length,
 +			// The whole request: sections, plus what the tool block costs, measured on the last one.
 +			promptTokens: this._lastAudit?.tokens ?? budget.tokens,
 +			requestCount: this._requestAuditor.history.length,
++			schemaTokens,
 +		};
 +	}
 +	/** A cache break that is expected to happen on the next request, and why. */
@@ -1232,7 +1241,7 @@ index a0dda03..0c981df 100644
  	/** Prompt options after before_agent_start mutations for the active run. */
  	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
  
-@@ -935,6 +982,9 @@ export class AgentSession {
+@@ -935,6 +991,9 @@ export class AgentSession {
  			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
  			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
  			this._runSystemPromptOptions = options;
@@ -1242,7 +1251,7 @@ index a0dda03..0c981df 100644
  
  			return {
  				...previousSnapshot,
-@@ -1604,9 +1654,17 @@ export class AgentSession {
+@@ -1604,9 +1663,17 @@ export class AgentSession {
  	 * `codemode` or `deferred` tool.
  	 */
  	private _getCallableTools(active: ReadonlySet<string> = new Set(this.getActiveToolNames())): AgentTool[] {
@@ -1261,7 +1270,7 @@ index a0dda03..0c981df 100644
  		});
  	}
  
-@@ -1664,7 +1722,9 @@ export class AgentSession {
+@@ -1664,7 +1731,9 @@ export class AgentSession {
  			});
  		}
  		this._hiddenDeclarations = hidden;
@@ -1272,7 +1281,7 @@ index a0dda03..0c981df 100644
  		return declared;
  	}
  
-@@ -1791,10 +1851,9 @@ export class AgentSession {
+@@ -1791,10 +1860,9 @@ export class AgentSession {
  		options.selectedTools = this._applyToolLoadout(options.selectedTools).map((tool) => tool.name);
  		// The tool list and rules must match the declarations the request carries.
  		options.hiddenTools = [...this._hiddenDeclarations];
@@ -1286,7 +1295,7 @@ index a0dda03..0c981df 100644
  		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
  	}
  
-@@ -2002,6 +2061,8 @@ export class AgentSession {
+@@ -2002,6 +2070,8 @@ export class AgentSession {
  		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
  		this._runSystemPromptOptions = result.systemPromptOptions;
  		if (updateMessage) messages.unshift(updateMessage);
@@ -1295,7 +1304,7 @@ index a0dda03..0c981df 100644
  		return messages;
  	}
  
-@@ -2887,9 +2948,44 @@ export class AgentSession {
+@@ -2887,9 +2957,44 @@ export class AgentSession {
  	 *
  	 * @param customInstructions Optional instructions for the compaction summary
  	 */
@@ -1340,7 +1349,7 @@ index a0dda03..0c981df 100644
  		this._emit({ type: "compaction_start", reason: "manual" });
  		let fromExtension = false;
  		let cancelledByExtension = false;
-@@ -3586,6 +3682,8 @@ export class AgentSession {
+@@ -3586,6 +3691,8 @@ export class AgentSession {
  				},
  				getSystemPrompt: () => this.systemPrompt,
  				getSystemPromptOptions: () => this._baseSystemPromptOptions,
@@ -6910,10 +6919,10 @@ index 6908131..1efbca8 100644
  			method: "POST",
  			headers: {
 diff --git a/packages/coding-agent/src/modes/print-mode.ts b/packages/coding-agent/src/modes/print-mode.ts
-index 84c0f9b..0f93ed7 100644
+index 84c0f9b..ab22b4f 100644
 --- a/packages/coding-agent/src/modes/print-mode.ts
 +++ b/packages/coding-agent/src/modes/print-mode.ts
-@@ -37,6 +37,26 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
+@@ -37,6 +37,29 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
  	let unsubscribe: (() => void) | undefined;
  	let unsubscribeBackpressure: (() => void) | undefined;
  	let disposing: Promise<void> | undefined;
@@ -6923,12 +6932,15 @@ index 84c0f9b..0f93ed7 100644
 +		const session = runtimeHost.session;
 +		const facts = session.getHarnessFacts();
 +		// Before any request there is no measured budget, so estimate the prompt we would send.
-+		const estimated = facts?.promptTokens ?? Math.ceil(session.systemPrompt.length / 3.6);
++		// `promptTokens` is 0 before the first request, so fall back to measuring the prompt itself.
++		const measured = facts?.promptTokens ?? 0;
++		const estimated = measured > 0 ? measured : Math.ceil(session.systemPrompt.length / 3.6);
 +		const payload =
 +			mode === "json"
 +				? JSON.stringify({
 +						tools: session.getActiveToolNames(),
 +						prompt_tokens: estimated,
++						schema_tokens: facts?.schemaTokens ?? 0,
 +						declared: facts?.declaredTools ?? session.getActiveToolNames().length,
 +					})
 +				: session.getActiveToolNames().join("\n");
