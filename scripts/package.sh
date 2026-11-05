@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble the publishable tarball for `reef-harness`.
+# Assemble the publishable tarball for `reef-code`.
 #
 #   scripts/package.sh            # build build/package and pack a tarball
 #   scripts/package.sh --install  # ...and install it globally into a scratch prefix to prove it
@@ -25,7 +25,8 @@ fi
 rm -rf "$out"
 mkdir -p "$out/dist"
 cp -R "$bundle" "$out/dist/bundle"
-cp -R "$root/apps/reef/bin" "$out/bin"
+mkdir -p "$out/bin"
+cp "$root/apps/reef/bin/reef.js" "$out/bin/"
 cp "$root/apps/reef/package.json" "$out/package.json"
 cp "$root/LICENSE" "$root/NOTICE" "$out/"
 [ -f "$root/README.md" ] && cp "$root/README.md" "$out/README.md"
@@ -35,7 +36,7 @@ mkdir -p "$out/vendor"
 cp "$root/vendor/pi.patch" "$out/vendor/pi.patch"
 
 version="$(node -p "require('$out/package.json').version")"
-echo "package: assembled $out (reef-harness $version)"
+echo "package: assembled $out (reef-code $version)"
 
 tarball="$(cd "$out" && npm pack --silent)"
 mv "$out/$tarball" "$root/build/$tarball"

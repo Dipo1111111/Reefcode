@@ -7,14 +7,14 @@ other tool reachable from inside it — instead of a dozen separate tool declara
 program instead of a single call, so work that took six round trips takes one.
 
 ```
-npm install -g reef-harness
+npm install -g reef-code
 reef
 ```
 
 ## Install
 
 ```bash
-npm install -g reef-harness      # or: pnpm add -g reef-harness
+npm install -g reef-code      # or: pnpm add -g reef-code
 reef --version
 ```
 
@@ -23,7 +23,7 @@ From a checkout, without publishing:
 ```bash
 cd code/reef
 npm run build
-scripts/package.sh --install            # builds build/reef-harness-<version>.tgz and installs it
+scripts/package.sh --install            # builds build/reef-code-<version>.tgz and installs it
 ```
 
 Requires **Node 22 or newer**. The npm package bundles its own runtime; the only dependency it

@@ -1,7 +1,7 @@
 {
-  "name": "reef-harness",
+  "name": "reef-code",
   "version": "0.1.0",
-  "description": "REEF — a coding agent harness. One script, many tool calls.",
+  "description": "REEF \u2014 a coding agent harness. One script, many tool calls.",
   "type": "module",
   "bin": {
     "reef": "bin/reef.js"
@@ -33,7 +33,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/reef-harness/reef.git"
+    "url": "git+https://github.com/reef-code/reef.git"
   },
-  "homepage": "https://github.com/reef-harness/reef#readme"
+  "homepage": "https://github.com/reef-code/reef#readme"
 }
