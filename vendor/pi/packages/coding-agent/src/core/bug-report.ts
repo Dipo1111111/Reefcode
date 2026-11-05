@@ -14,7 +14,7 @@ import type { ModelRuntime } from "./model-runtime.ts";
 import type { ReadonlySessionManager } from "./session-manager.ts";
 import type { Settings } from "./settings-manager.ts";
 
-export const BUG_REPORT_CUSTOM_ENTRY_TYPE = "pi.bug-report";
+export const BUG_REPORT_CUSTOM_ENTRY_TYPE = "reef.bug-report";
 const BUG_REPORT_SCHEMA_VERSION = 1;
 const REDACTED = "<redacted>";
 const SENSITIVE_KEY = /(?:^|[-_])(api[-_]?key|secret|token|password|passwd|credential|authorization|cookie)(?:$|[-_])/i;
