@@ -48,6 +48,110 @@ const IMAGE_HELPER_EXPECTS =
 export const PRELUDE_SOURCE: string = `(function (bridge, toolsJson, globalsJson, storeJson) {
 	"use strict";
 
+	// QuickJS has neither TextEncoder nor TextDecoder, and a script that measures its own output —
+	// "keep the page under 12 KB" — reached for one, wrote the file, and then failed with
+	// "ReferenceError: TextEncoder is not defined" after the work was already on disk. UTF-8 per the
+	// encoding standard: lone surrogates and over-long sequences become U+FFFD, and fatal throws.
+	(function installTextCodec() {
+		const codec = "utf-8";
+		function encode(input) {
+			const text = String(input);
+			const bytes = [];
+			for (let index = 0; index < text.length; index += 1) {
+				let point = text.charCodeAt(index);
+				const high = point >= 0xd800 && point <= 0xdbff;
+				const low = point >= 0xdc00 && point <= 0xdfff;
+				if (high && index + 1 < text.length) {
+					const next = text.charCodeAt(index + 1);
+					if (next >= 0xdc00 && next <= 0xdfff) {
+						point = 0x10000 + ((point - 0xd800) << 10) + (next - 0xdc00);
+						index += 1;
+					} else {
+						point = 0xfffd;
+					}
+				} else if (low) {
+					point = 0xfffd;
+				}
+				if (point < 0x80) bytes.push(point);
+				else if (point < 0x800) bytes.push(0xc0 | (point >> 6), 0x80 | (point & 0x3f));
+				else if (point < 0x10000) bytes.push(0xe0 | (point >> 12), 0x80 | ((point >> 6) & 0x3f), 0x80 | (point & 0x3f));
+				else bytes.push(0xf0 | (point >> 18), 0x80 | ((point >> 12) & 0x3f), 0x80 | ((point >> 6) & 0x3f), 0x80 | (point & 0x3f));
+			}
+			return new Uint8Array(bytes);
+		}
+		function invalid(fatal) {
+			if (fatal) throw new TypeError("The encoded data was not valid for encoding utf-8");
+			return "\ufffd";
+		}
+		function decode(input, options) {
+			if (input === undefined || input === null) return "";
+			const fatal = Boolean(options && options.fatal);
+			const bytes =
+				input instanceof Uint8Array ? input : new Uint8Array(input.buffer || input, input.byteOffset || 0, input.byteLength);
+			let text = "";
+			let needed = 0;
+			let point = 0;
+			let started = false;
+			for (let index = 0; index < bytes.length; index += 1) {
+				const byte = bytes[index];
+				if (needed === 0) {
+					if (byte < 0x80) text += String.fromCharCode(byte);
+					else if (byte >= 0xc2 && byte <= 0xdf) {
+						needed = 1;
+						point = byte & 0x1f;
+					} else if (byte >= 0xe0 && byte <= 0xef) {
+						needed = 2;
+						point = byte & 0x0f;
+					} else if (byte >= 0xf0 && byte <= 0xf4) {
+						needed = 3;
+						point = byte & 0x07;
+					} else text += invalid(fatal);
+					started = true;
+					continue;
+				}
+				if ((byte & 0xc0) !== 0x80) {
+					text += invalid(fatal);
+					needed = 0;
+					index -= 1;
+					continue;
+				}
+				point = (point << 6) | (byte & 0x3f);
+				needed -= 1;
+				if (needed === 0) {
+					if (point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff)) text += invalid(fatal);
+					else if (point > 0xffff) {
+						const rest = point - 0x10000;
+						text += String.fromCharCode(0xd800 + (rest >> 10), 0xdc00 + (rest & 0x3ff));
+					} else text += String.fromCharCode(point);
+				}
+				started = true;
+			}
+			if (needed > 0) text += invalid(fatal);
+			if (started && text.charCodeAt(0) === 0xfeff && !(options && options.ignoreBOM)) text = text.slice(1);
+			return text;
+		}
+		function TextEncoder() {
+			if (!new.target) throw new TypeError("TextEncoder must be called with new");
+		}
+		Object.defineProperty(TextEncoder.prototype, "encoding", { value: codec, enumerable: true });
+		TextEncoder.prototype.encode = function (value) {
+			return value === undefined ? new Uint8Array(0) : encode(value);
+		};
+		function TextDecoder(label, options) {
+			if (label !== undefined && label !== null && String(label).toLowerCase() !== codec) {
+				throw new RangeError("Unsupported encoding: " + label);
+			}
+			this.encoding = codec;
+			this.fatal = Boolean(options && options.fatal);
+			this.ignoreBOM = Boolean(options && options.ignoreBOM);
+		}
+		TextDecoder.prototype.decode = function (value) {
+			return decode(value, { fatal: this.fatal, ignoreBOM: this.ignoreBOM });
+		};
+		Object.defineProperty(globalThis, "TextEncoder", { value: TextEncoder, writable: true, configurable: true, enumerable: false });
+		Object.defineProperty(globalThis, "TextDecoder", { value: TextDecoder, writable: true, configurable: true, enumerable: false });
+	})();
+
 	// Freeze every object reachable from the built-in globals, plus the intrinsics that are only
 	// reachable from instances (iterator and generator prototypes, %TypedArray%).
 	//
