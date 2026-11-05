@@ -1,0 +1,1521 @@
+diff --git a/packages/codemode/src/index.ts b/packages/codemode/src/index.ts
+index d2e4d85..ee333f9 100644
+--- a/packages/codemode/src/index.ts
++++ b/packages/codemode/src/index.ts
+@@ -39,6 +39,10 @@ export {
+ 	type CodemodeSourceOptions,
+ 	type ParsedCodemodeSource,
+ 	parseCodemodeSource,
++	parseScriptInputs,
++	parseScriptSource,
++	type ParsedScriptSource,
++	type ScriptInput,
+ } from "./source.ts";
+ export type {
+ 	CodemodeCall,
+diff --git a/packages/codemode/src/runtime/execution.ts b/packages/codemode/src/runtime/execution.ts
+index 06199e9..bb6a484 100644
+--- a/packages/codemode/src/runtime/execution.ts
++++ b/packages/codemode/src/runtime/execution.ts
+@@ -179,6 +179,7 @@ interface ExecutionOptions {
+ 	signal: AbortSignal | undefined;
+ 	memoryLimitBytes: number | undefined;
+ 	store: Record<string, string>;
++	inputs?: Record<string, string>;
+ 	deterministic?: { startedAt: number; seed: number };
+ 	control?: Control;
+ 	launch: VmLauncher;
+@@ -236,6 +237,7 @@ class Execution {
+ 			globals: options.globals.map((global) => ({ name: global.name, spread: global.spread === true })),
+ 			memoryLimitBytes: options.memoryLimitBytes,
+ 			store: options.store,
++			...(options.inputs ? { inputs: options.inputs } : {}),
+ 			...(options.deterministic ? { deterministic: options.deterministic } : {}),
+ 		};
+ 		const events: VmEvents = {
+@@ -510,6 +512,7 @@ export class CodemodeSandboxBase {
+ 			signal: options.signal,
+ 			memoryLimitBytes: this.memoryLimitBytes,
+ 			store: serializeStore(options.store),
++			...(options.inputs ? { inputs: options.inputs } : {}),
+ 			launch: this.launch,
+ 		});
+ 		this.running.add(execution);
+@@ -553,6 +556,7 @@ export class CodemodeSandboxBase {
+ 			deterministic: { startedAt: options.startedAt, seed: options.seed },
+ 			control: { onStarted: options.onStarted, onCall: options.onCall, onIdle: options.onIdle },
+ 			launch: this.launch,
++			...(options.inputs ? { inputs: options.inputs } : {}),
+ 		});
+ 		this.running.add(execution);
+ 		const result = execution.promise.finally(() => this.running.delete(execution));
+diff --git a/packages/codemode/src/runtime/protocol.ts b/packages/codemode/src/runtime/protocol.ts
+index 0f1e126..02b6fad 100644
+--- a/packages/codemode/src/runtime/protocol.ts
++++ b/packages/codemode/src/runtime/protocol.ts
+@@ -19,6 +19,8 @@ export interface VmStartData {
+ 	memoryLimitBytes: number | undefined;
+ 	/** Snapshot for `load()`: key to JSON text. */
+ 	store: Record<string, string>;
++	/** Values from `// @input:` blocks, available to the script as `inputs`. */
++	inputs?: Record<string, string>;
+ 	/**
+ 	 * Run deterministically (`CodemodeSandboxBase.start()`): UTC, a virtual clock starting at `startedAt` (ms since
+ 	 * the epoch) that moves only with delivered results, randomness from `seed`, no `WeakRef`, results applied in
+diff --git a/packages/codemode/src/runtime/vm.ts b/packages/codemode/src/runtime/vm.ts
+index 2618eef..d5776e4 100644
+--- a/packages/codemode/src/runtime/vm.ts
++++ b/packages/codemode/src/runtime/vm.ts
+@@ -324,7 +324,12 @@ export async function startVm(options: StartVmOptions): Promise<VmSession> {
+ 		// match the script as written.
+ 		let fn: JSValueHandle;
+ 		try {
+-			fn = vm.evalCode(`(async (tools, console) => {${data.code}\n})`, "codemode.js");
++			// `inputs` is injected on the first line so the script's own line numbers are unchanged.
++			const inputsPrefix =
++				data.inputs && Object.keys(data.inputs).length > 0
++					? `var inputs=Object.freeze(${JSON.stringify(data.inputs)});`
++					: "var inputs=Object.freeze({});";
++			fn = vm.evalCode(`(async (tools, console) => {${inputsPrefix}${data.code}\n})`, "codemode.js");
+ 		} catch (error) {
+ 			if (!(error instanceof JSException)) throw error;
+ 			post({ type: "done", ok: false, error: describeException(error) });
+diff --git a/packages/codemode/src/source.ts b/packages/codemode/src/source.ts
+index 6d7ba85..4b0a3f5 100644
+--- a/packages/codemode/src/source.ts
++++ b/packages/codemode/src/source.ts
+@@ -10,8 +10,8 @@
+ 
+ export const CODEMODE_OPTIONS_PREFIX = "// @options:";
+ 
+-const SUPPORTED_FIELDS = ["max_output_tokens", "timeout_ms"] as const;
+-const SUPPORTED_FIELDS_TEXT = "`max_output_tokens` and `timeout_ms`";
++const SUPPORTED_FIELDS = ["max_output_tokens", "timeout_ms", "startInBackground"] as const;
++const SUPPORTED_FIELDS_TEXT = "`max_output_tokens`, `timeout_ms`, and `startInBackground`";
+ /** Largest delay `setTimeout` supports, which bounds `timeout_ms`. */
+ const MAX_TIMEOUT_MS = 2_147_483_647;
+ 
+@@ -34,6 +34,11 @@ export interface CodemodeSourceOptions {
+ 	maxOutputTokens?: number;
+ 	/** Hard deadline for the whole script in milliseconds, including tool calls. */
+ 	timeoutMs?: number;
++	/**
++	 * Return as soon as the script starts, and keep running it in the background. The tool result
++	 * carries the job id; `wait_for_script` waits on it, polls it, or kills it.
++	 */
++	startInBackground?: boolean;
+ }
+ 
+ export interface ParsedCodemodeSource {
+@@ -75,7 +80,11 @@ function parseOptions(directive: string): CodemodeSourceOptions {
+ 		}
+ 	}
+ 	const options: CodemodeSourceOptions = {};
+-	const { max_output_tokens, timeout_ms } = fields;
++	const { max_output_tokens, timeout_ms, startInBackground } = fields;
++	if (startInBackground !== undefined && typeof startInBackground !== "boolean") {
++		throw new CodemodeSourceError("`startInBackground` must be true or false");
++	}
++	if (startInBackground === true) options.startInBackground = true;
+ 	if (max_output_tokens !== undefined) {
+ 		if (!isSafeInteger(max_output_tokens)) {
+ 			throw new CodemodeSourceError("@options field `max_output_tokens` must be a non-negative safe integer");
+@@ -123,3 +132,72 @@ export function parseCodemodeSource(input: string): ParsedCodemodeSource {
+ 	}
+ 	return { code, options: parseOptions(trimmed.slice(CODEMODE_OPTIONS_PREFIX.length).trim()) };
+ }
++
++// =============================================================================
++// Script input blocks (`// @input: name <<'EOF' ... EOF`)
++// =============================================================================
++
++/** One heredoc input block, available to the script as `inputs[name]`. */
++export interface ScriptInput {
++	name: string;
++	value: string;
++	/** 1-based line of the `// @input:` directive. */
++	line: number;
++}
++
++export interface ParsedScriptSource extends ParsedCodemodeSource {
++	/** Input blocks, in source order. Later blocks with the same name win. */
++	inputs: readonly ScriptInput[];
++}
++
++const INPUT_DIRECTIVE = /^\s*\/\/\s*@input:\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2\s*$/;
++/** `// @script: {...}` is an alias of `// @options: {...}`, named for the tool the model calls. */
++const SCRIPT_OPTIONS_PREFIX = "// @script:";
++
++/**
++ * Extract `// @input: name <<'TAG'` blocks.
++ *
++ * The block's body is removed from the executable source and replaced by blank lines, so line
++ * numbers in error messages still match what the model wrote. The values are handed to the
++ * sandbox as `inputs`, which the prelude defines as a frozen object.
++ */
++export function parseScriptInputs(code: string): { code: string; inputs: ScriptInput[] } {
++	const lines = code.split("\n");
++	const inputs: ScriptInput[] = [];
++	for (let i = 0; i < lines.length; i++) {
++		const match = INPUT_DIRECTIVE.exec(lines[i] ?? "");
++		if (!match) continue;
++		const name = match[1] as string;
++		const tag = match[3] as string;
++		const body: string[] = [];
++		let closed = false;
++		let j = i + 1;
++		for (; j < lines.length; j++) {
++			const line = lines[j] ?? "";
++			if (line.trim() === tag) {
++				closed = true;
++				break;
++			}
++			body.push(line);
++		}
++		if (!closed) {
++			throw new CodemodeSourceError(
++				`@input \`${name}\` on line ${i + 1} is not closed: expected a line containing only \`${tag}\``,
++			);
++		}
++		inputs.push({ name, value: body.join("\n"), line: i + 1 });
++		for (let k = i; k <= j; k++) lines[k] = "";
++		i = j;
++	}
++	return { code: lines.join("\n"), inputs };
++}
++
++/** `parseScriptInputs` after `parseCodemodeSource`: options line first, then input blocks. */
++export function parseScriptSource(source: string, options?: CodemodeSourceOptions): ParsedScriptSource {
++	const normalized = source.trimStart().startsWith(SCRIPT_OPTIONS_PREFIX)
++		? `// @options:${source.trimStart().slice(SCRIPT_OPTIONS_PREFIX.length)}`
++		: source;
++	const parsed = parseCodemodeSource(normalized);
++	const { code, inputs } = parseScriptInputs(parsed.code);
++	return { code, options: parsed.options, inputs };
++}
+diff --git a/packages/codemode/src/types.ts b/packages/codemode/src/types.ts
+index e69cd29..65ca9f4 100644
+--- a/packages/codemode/src/types.ts
++++ b/packages/codemode/src/types.ts
+@@ -211,6 +211,8 @@ export interface CodemodeRunOptions {
+ 	tools?: CodemodeDeclaredTool[];
+ 	globals?: CodemodeDeclaredGlobal[];
+ 	store?: Readonly<Record<string, unknown>>;
++	/** Values from `// @input:` blocks, available to the script as the frozen `inputs` object. */
++	inputs?: Readonly<Record<string, string>>;
+ 	signal?: AbortSignal;
+ 	/** Deadline of this run in ms. Default: none (not the sandbox's default). */
+ 	timeoutMs?: number;
+@@ -251,4 +253,6 @@ export interface CodemodeExecuteOptions {
+ 	 * `store()` calls come back as `result.storeWrites`; persisting them is up to the caller.
+ 	 */
+ 	store?: Readonly<Record<string, unknown>>;
++	/** Values from `// @input:` blocks, available to the script as the frozen `inputs` object. */
++	inputs?: Readonly<Record<string, string>>;
+ }
+diff --git a/packages/coding-agent/package.json b/packages/coding-agent/package.json
+index 13e6335..380ce0d 100644
+--- a/packages/coding-agent/package.json
++++ b/packages/coding-agent/package.json
+@@ -1,13 +1,14 @@
+ {
+ 	"name": "@earendil-works/pi-coding-agent",
+ 	"version": "1.5.0",
+-	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
++	"description": "REEF coding agent CLI",
+ 	"type": "module",
+ 	"piConfig": {
+-		"configDir": ".pi"
++		"name": "reef",
++		"configDir": ".reef"
+ 	},
+ 	"bin": {
+-		"pi": "dist/bundle/cli.js"
++		"reef": "dist/bundle/cli.js"
+ 	},
+ 	"main": "./dist/index.js",
+ 	"types": "./dist/index.d.ts",
+diff --git a/packages/coding-agent/src/cli/args.ts b/packages/coding-agent/src/cli/args.ts
+index 4bcd28d..de4d159 100644
+--- a/packages/coding-agent/src/cli/args.ts
++++ b/packages/coding-agent/src/cli/args.ts
+@@ -281,7 +281,7 @@ export function printHelp(extensionFlags?: ExtensionFlag[]): void {
+ 					})
+ 					.join("\n")}\n`
+ 			: "";
+-	console.log(`${chalk.bold(APP_NAME)} - AI coding assistant with read, bash, edit, write tools
++	console.log(`${chalk.bold(APP_NAME.toUpperCase())} - a coding agent harness. One script, many tool calls.
+ 
+ ${chalk.bold("Usage:")}
+   ${APP_NAME} [options] [--] [@files...] [messages...]
+@@ -290,7 +290,7 @@ ${chalk.bold("Commands:")}
+   ${APP_NAME} install <source> [-l]     Install extension source and add to settings
+   ${APP_NAME} remove <source> [-l]      Remove extension source from settings
+   ${APP_NAME} uninstall <source> [-l]   Alias for remove
+-  ${APP_NAME} update [source|self|pi]   Update pi, extensions, or model catalogs
++  ${APP_NAME} update [source|self]      Update ${APP_NAME}, extensions, or model catalogs
+   ${APP_NAME} list                      List installed extensions from settings
+   ${APP_NAME} config [-l]               Open TUI to enable/disable package resources (Tab switches scope)
+   ${APP_NAME} auth <command>            Print credentials or check provider readiness
+@@ -340,7 +340,7 @@ ${chalk.bold("Options:")}
+   --tui-mode <mode>              TUI mode: fullscreen (default) or regular
+   --approve, -a                  Trust project-local files for this run
+   --no-approve, -na              Ignore project-local files for this run
+-  --offline                      Disable startup network operations (same as PI_OFFLINE=1)
++  --offline                      Disable startup network operations (same as REEF_OFFLINE=1)
+   --                             End option parsing; treat remaining arguments as messages/files
+   --help, -h                     Show this help
+   --version, -v                  Show version number
+@@ -461,11 +461,11 @@ ${chalk.bold("Environment Variables:")}
+   AWS_REGION                       - AWS region for Amazon Bedrock (e.g., us-east-1)
+   ${ENV_AGENT_DIR.padEnd(32)} - Config directory (default: ~/${CONFIG_DIR_NAME}/agent)
+   ${ENV_SESSION_DIR.padEnd(32)} - Session storage directory (overridden by --session-dir)
+-  PI_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)
+-  PI_OFFLINE                       - Disable startup network operations when set to 1/true/yes
+-  PI_SELF_UPDATE_COMMAND           - Command pi update runs to update pi itself ({packageName}, {version}, {installSpec})
+-  PI_TELEMETRY                     - Override install telemetry when set to 1/true/yes or 0/false/no
+-  PI_SHARE_VIEWER_URL              - Base URL for /share command (default: https://pi.dev/session/)
++  REEF_PACKAGE_DIR                 - Override package directory (for Nix/Guix store paths)
++  REEF_OFFLINE                     - Disable startup network operations when set to 1/true/yes
++  REEF_SELF_UPDATE_COMMAND         - Command reef update self runs to update reef itself
++  REEF_TELEMETRY                   - Override install telemetry when set to 1/true/yes or 0/false/no
++  REEF_SHARE_VIEWER_URL            - Base URL for the /share command
+ 
+ ${chalk.bold("Built-in Tool Names:")}
+   read       - Read file contents
+diff --git a/packages/coding-agent/src/cli/setup.ts b/packages/coding-agent/src/cli/setup.ts
+index 8ddf34a..8ff5895 100644
+--- a/packages/coding-agent/src/cli/setup.ts
++++ b/packages/coding-agent/src/cli/setup.ts
+@@ -3,7 +3,7 @@ import { configureHttpDispatcher } from "../core/http-dispatcher.ts";
+ 
+ export function setupCli(): void {
+ 	process.title = APP_NAME;
+-	process.env.PI_CODING_AGENT = "true";
++	process.env.REEF_CODING_AGENT = "true";
+ 	process.env.AI_AGENT = "pi";
+ 	process.emitWarning = (() => {}) as typeof process.emitWarning;
+ 
+diff --git a/packages/coding-agent/src/cli/startup-ui.ts b/packages/coding-agent/src/cli/startup-ui.ts
+index de22205..109e693 100644
+--- a/packages/coding-agent/src/cli/startup-ui.ts
++++ b/packages/coding-agent/src/cli/startup-ui.ts
+@@ -124,7 +124,7 @@ async function clearStartupTui(ui: TUI): Promise<void> {
+ /**
+  * First-time setup runs when all of these hold:
+  * - this is the official Pi distribution (not a fork/rebrand)
+- * - experimental features are enabled (PI_EXPERIMENTAL=1)
++ * - experimental features are enabled (REEF_EXPERIMENTAL=1)
+  * - the default agent directory is used (no custom agent dir override)
+  * - setup was not completed before (settings.json does not exist)
+  */
+diff --git a/packages/coding-agent/src/config.ts b/packages/coding-agent/src/config.ts
+index 5a9552d..2ac0a85 100644
+--- a/packages/coding-agent/src/config.ts
++++ b/packages/coding-agent/src/config.ts
+@@ -335,11 +335,11 @@ export function getSelfUpdateCommand(
+ }
+ 
+ /**
+- * The self-update command configured by the user: `PI_SELF_UPDATE_COMMAND` (whitespace-separated
++ * The self-update command configured by the user: `REEF_SELF_UPDATE_COMMAND` (whitespace-separated
+  * argv, no quoting), else the global `selfUpdateCommand` setting. Overrides install-method detection.
+  */
+ export function getConfiguredSelfUpdateArgv(setting: string[] | undefined): string[] | undefined {
+-	const fromEnv = process.env.PI_SELF_UPDATE_COMMAND?.trim().split(/\s+/).filter(Boolean);
++	const fromEnv = process.env.REEF_SELF_UPDATE_COMMAND?.trim().split(/\s+/).filter(Boolean);
+ 	if (fromEnv?.length) return fromEnv;
+ 	return setting?.length ? setting : undefined;
+ }
+@@ -417,7 +417,7 @@ export function findNodePackageDir(startDir: string): string {
+ 
+ export function getPackageDir(): string {
+ 	// Allow override via environment variable (useful for Nix/Guix where store paths tokenize poorly)
+-	const envDir = process.env.PI_PACKAGE_DIR;
++	const envDir = process.env.REEF_PACKAGE_DIR;
+ 	if (envDir) {
+ 		return normalizePath(envDir);
+ 	}
+@@ -606,7 +606,7 @@ export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
+ export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".pi";
+ export const VERSION: string = pkg.version || "0.0.0";
+ 
+-// e.g., PI_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR
++// e.g., REEF_CODING_AGENT_DIR or TAU_CODING_AGENT_DIR
+ export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
+ export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
+ 
+@@ -618,7 +618,7 @@ const DEFAULT_SHARE_VIEWER_URL = "https://pi.dev/session/";
+ 
+ /** Get the share viewer URL for a gist ID. */
+ export function getShareViewerUrl(gistId: string): string {
+-	const baseUrl = process.env.PI_SHARE_VIEWER_URL || DEFAULT_SHARE_VIEWER_URL;
++	const baseUrl = process.env.REEF_SHARE_VIEWER_URL || DEFAULT_SHARE_VIEWER_URL;
+ 	return `${baseUrl}#${gistId}`;
+ }
+ 
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index a0dda03..772b82c 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -1604,9 +1604,17 @@ export class AgentSession {
+ 	 * `codemode` or `deferred` tool.
+ 	 */
+ 	private _getCallableTools(active: ReadonlySet<string> = new Set(this.getActiveToolNames())): AgentTool[] {
++		// With the script engine on, every registered direct tool is reachable from a script even
++		// when its own declaration is hidden. Without this, hiding a declaration would also remove
++		// the tool from scripts, which is the opposite of the point.
++		const scriptActive = active.has("script") || this._hiddenDeclarations.has("read");
+ 		return [...this._toolRegistry.values()].filter((tool) => {
+ 			const exposure = this._getToolExposure(tool.name);
+-			return exposure === "codemode" || exposure === "deferred" || (exposure === "direct" && active.has(tool.name));
++			if (exposure === "hidden") return false;
++			if (this._hiddenDeclarations.has(tool.name)) return true;
++			if (exposure === "codemode" || exposure === "deferred") return true;
++			if (exposure === "direct") return active.has(tool.name) || scriptActive;
++			return false;
+ 		});
+ 	}
+ 
+@@ -1664,7 +1672,9 @@ export class AgentSession {
+ 			});
+ 		}
+ 		this._hiddenDeclarations = hidden;
+-		this.agent.state.tools = declared;
++		// A hidden declaration is left out of the request entirely: it keeps no schema, no
++		// description, and no entry in the tools array. The tool stays active and callable.
++		this.agent.state.tools = hidden.size === 0 ? declared : declared.filter((tool) => !hidden.has(tool.name));
+ 		return declared;
+ 	}
+ 
+diff --git a/packages/coding-agent/src/core/cache-warmer.ts b/packages/coding-agent/src/core/cache-warmer.ts
+index 60e94dd..bb896b1 100644
+--- a/packages/coding-agent/src/core/cache-warmer.ts
++++ b/packages/coding-agent/src/core/cache-warmer.ts
+@@ -39,7 +39,7 @@ export function getCacheWarmingDelayMs(ttlMs: number): number | undefined {
+ export function getPromptCacheTtlMs(model: Model<Api>, options: SimpleStreamOptions | undefined): number | undefined {
+ 	const retention =
+ 		options?.cacheRetention ??
+-		(getProviderEnvValue("PI_CACHE_RETENTION", options?.env) === "long" ? "long" : "short");
++		(getProviderEnvValue("REEF_CACHE_RETENTION", options?.env) === "long" ? "long" : "short");
+ 	if (retention === "none") return undefined;
+ 	const seconds = model.promptCache?.[retention];
+ 	return seconds === undefined ? undefined : seconds * 1000;
+diff --git a/packages/coding-agent/src/core/experimental.ts b/packages/coding-agent/src/core/experimental.ts
+index 12d33c7..6dcc867 100644
+--- a/packages/coding-agent/src/core/experimental.ts
++++ b/packages/coding-agent/src/core/experimental.ts
+@@ -1,3 +1,3 @@
+ export function areExperimentalFeaturesEnabled(): boolean {
+-	return process.env.PI_EXPERIMENTAL === "1";
++	return process.env.REEF_EXPERIMENTAL === "1";
+ }
+diff --git a/packages/coding-agent/src/core/model-runtime.ts b/packages/coding-agent/src/core/model-runtime.ts
+index 6a5520d..ba198e2 100644
+--- a/packages/coding-agent/src/core/model-runtime.ts
++++ b/packages/coding-agent/src/core/model-runtime.ts
+@@ -245,7 +245,7 @@ export class ModelRuntime implements Models {
+ 			modelsPath,
+ 			modelsStore,
+ 			providers,
+-			process.env.PI_OFFLINE === undefined,
++			process.env.REEF_OFFLINE === undefined,
+ 		);
+ 		runtime.configureRadiusProviders();
+ 		runtime.rebuildProviders();
+diff --git a/packages/coding-agent/src/core/package-manager.ts b/packages/coding-agent/src/core/package-manager.ts
+index 5fd9375..e87354c 100644
+--- a/packages/coding-agent/src/core/package-manager.ts
++++ b/packages/coding-agent/src/core/package-manager.ts
+@@ -60,9 +60,9 @@ const NETWORK_TIMEOUT_MS = 10000;
+ const UPDATE_CHECK_CONCURRENCY = 4;
+ const GIT_UPDATE_CONCURRENCY = 4;
+ 
+-/** Whether PI_OFFLINE is set; package installs and updates then skip all network access. */
++/** Whether REEF_OFFLINE is set; package installs and updates then skip all network access. */
+ export function isOfflineModeEnabled(): boolean {
+-	const value = process.env.PI_OFFLINE;
++	const value = process.env.REEF_OFFLINE;
+ 	if (!value) return false;
+ 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
+ }
+diff --git a/packages/coding-agent/src/core/radius.ts b/packages/coding-agent/src/core/radius.ts
+index c37b7a5..88f3610 100644
+--- a/packages/coding-agent/src/core/radius.ts
++++ b/packages/coding-agent/src/core/radius.ts
+@@ -1,11 +1,11 @@
+ import { DEFAULT_RADIUS_GATEWAY, normalizeRadiusGatewayUrl } from "@earendil-works/pi-ai/providers/radius-config";
+ 
+ export const RADIUS_PROVIDER_ID = "radius";
+-export const ENV_RADIUS_GATEWAY = "PI_RADIUS_GATEWAY";
++export const ENV_RADIUS_GATEWAY = "REEF_RADIUS_GATEWAY";
+ /** MCP endpoint of the gateway the built-in Radius provider signs in to. */
+ export const RADIUS_MCP_URL = `${normalizeRadiusGatewayUrl(DEFAULT_RADIUS_GATEWAY)}/mcp`;
+ 
+-/** Radius gateway origin, honoring the `PI_RADIUS_GATEWAY` override. */
++/** Radius gateway origin, honoring the `REEF_RADIUS_GATEWAY` override. */
+ export function getRadiusGatewayUrl(): string {
+ 	return normalizeRadiusGatewayUrl(process.env[ENV_RADIUS_GATEWAY] ?? DEFAULT_RADIUS_GATEWAY);
+ }
+diff --git a/packages/coding-agent/src/core/settings-manager.ts b/packages/coding-agent/src/core/settings-manager.ts
+index 99bbead..17fd8df 100644
+--- a/packages/coding-agent/src/core/settings-manager.ts
++++ b/packages/coding-agent/src/core/settings-manager.ts
+@@ -1240,7 +1240,7 @@ export class SettingsManager {
+ 		if (this.settings.terminal?.clearOnShrink !== undefined) {
+ 			return this.settings.terminal.clearOnShrink;
+ 		}
+-		if (process.env.PI_CLEAR_ON_SHRINK === "1") return true;
++		if (process.env.REEF_CLEAR_ON_SHRINK === "1") return true;
+ 		return SETTINGS_DEFAULTS.terminal.clearOnShrink;
+ 	}
+ 
+@@ -1389,7 +1389,7 @@ export class SettingsManager {
+ 	}
+ 
+ 	getShowHardwareCursor(): boolean {
+-		return this.settings.showHardwareCursor ?? process.env.PI_HARDWARE_CURSOR === "1";
++		return this.settings.showHardwareCursor ?? process.env.REEF_HARDWARE_CURSOR === "1";
+ 	}
+ 
+ 	setShowHardwareCursor(enabled: boolean): void {
+diff --git a/packages/coding-agent/src/core/settings-schema.ts b/packages/coding-agent/src/core/settings-schema.ts
+index 1ef7973..908d5cc 100644
+--- a/packages/coding-agent/src/core/settings-schema.ts
++++ b/packages/coding-agent/src/core/settings-schema.ts
+@@ -287,7 +287,7 @@ export const SettingsSchema = Type.Object(
+ 			Type.Array(Type.String(), {
+ 				minItems: 1,
+ 				description:
+-					'Command `pi update` runs to update Pi itself, in argv form such as ["mise", "use", "-g", "npm:{packageName}@{version}"]. Placeholders: {packageName}, {version}, {installSpec}. PI_SELF_UPDATE_COMMAND takes precedence. Global setting only.',
++					'Command `pi update` runs to update Pi itself, in argv form such as ["mise", "use", "-g", "npm:{packageName}@{version}"]. Placeholders: {packageName}, {version}, {installSpec}. REEF_SELF_UPDATE_COMMAND takes precedence. Global setting only.',
+ 			}),
+ 		),
+ 		collapseChangelog: Type.Optional(
+diff --git a/packages/coding-agent/src/core/system-prompt.ts b/packages/coding-agent/src/core/system-prompt.ts
+index e51e14f..225df1b 100644
+--- a/packages/coding-agent/src/core/system-prompt.ts
++++ b/packages/coding-agent/src/core/system-prompt.ts
+@@ -153,7 +153,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
+ 		promptSections.preamble = customPrompt;
+ 	} else {
+ 		promptSections.preamble =
+-			"You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.";
++			"You are a coding assistant running inside reef, a coding agent harness. Help users inspect files, run commands, and modify code.";
+ 		const visibleTools = declaredTools.filter((name) => !!toolSnippets[name]);
+ 		const tools =
+ 			visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
+diff --git a/packages/coding-agent/src/core/telemetry.ts b/packages/coding-agent/src/core/telemetry.ts
+index 25111c2..b9dc7b8 100644
+--- a/packages/coding-agent/src/core/telemetry.ts
++++ b/packages/coding-agent/src/core/telemetry.ts
+@@ -7,7 +7,7 @@ function isTruthyEnvFlag(value: string | undefined): boolean {
+ 
+ export function isInstallTelemetryEnabled(
+ 	settingsManager: SettingsManager,
+-	telemetryEnv: string | undefined = process.env.PI_TELEMETRY,
++	telemetryEnv: string | undefined = process.env.REEF_TELEMETRY,
+ ): boolean {
+ 	return telemetryEnv !== undefined ? isTruthyEnvFlag(telemetryEnv) : settingsManager.getEnableInstallTelemetry();
+ }
+diff --git a/packages/coding-agent/src/core/timings.ts b/packages/coding-agent/src/core/timings.ts
+index 2e031e8..5f0a36c 100644
+--- a/packages/coding-agent/src/core/timings.ts
++++ b/packages/coding-agent/src/core/timings.ts
+@@ -1,9 +1,9 @@
+ /**
+  * Central timing instrumentation for startup profiling.
+- * Enable with PI_TIMING=1 environment variable.
++ * Enable with REEF_TIMING=1 environment variable.
+  */
+ 
+-const ENABLED = process.env.PI_TIMING === "1";
++const ENABLED = process.env.REEF_TIMING === "1";
+ interface TimingNamespace {
+ 	timings: Array<{ label: string; ms: number }>;
+ 	lastTime: number;
+diff --git a/packages/coding-agent/src/core/tools/bash.ts b/packages/coding-agent/src/core/tools/bash.ts
+index 2084d6f..2db17b2 100644
+--- a/packages/coding-agent/src/core/tools/bash.ts
++++ b/packages/coding-agent/src/core/tools/bash.ts
+@@ -190,21 +190,21 @@ function resolveSpawnContext(
+ 	ctx: ExtensionContext | undefined,
+ ): BashSpawnContext {
+ 	const env = { ...getShellEnv() };
+-	delete env.PI_SESSION_ID;
+-	delete env.PI_SESSION_FILE;
+-	delete env.PI_PROVIDER;
+-	delete env.PI_MODEL;
+-	delete env.PI_REASONING_LEVEL;
++	delete env.REEF_SESSION_ID;
++	delete env.REEF_SESSION_FILE;
++	delete env.REEF_PROVIDER;
++	delete env.REEF_MODEL;
++	delete env.REEF_REASONING_LEVEL;
+ 	if (exposeSessionEnvironment && ctx) {
+ 		const model = ctx.model;
+-		env.PI_SESSION_ID = ctx.sessionManager.getSessionId();
++		env.REEF_SESSION_ID = ctx.sessionManager.getSessionId();
+ 		const sessionFile = ctx.sessionManager.getSessionFile();
+-		if (sessionFile) env.PI_SESSION_FILE = sessionFile;
++		if (sessionFile) env.REEF_SESSION_FILE = sessionFile;
+ 		if (model) {
+-			env.PI_PROVIDER = model.provider;
+-			env.PI_MODEL = model.id;
++			env.REEF_PROVIDER = model.provider;
++			env.REEF_MODEL = model.id;
+ 		}
+-		if (ctx.thinkingLevel) env.PI_REASONING_LEVEL = ctx.thinkingLevel;
++		if (ctx.thinkingLevel) env.REEF_REASONING_LEVEL = ctx.thinkingLevel;
+ 	}
+ 	const baseContext: BashSpawnContext = { command, cwd, env };
+ 	return spawnHook ? spawnHook(baseContext) : baseContext;
+diff --git a/packages/coding-agent/src/extensions/codemode/execute.ts b/packages/coding-agent/src/extensions/codemode/execute.ts
+index b363599..a9e2b0a 100644
+--- a/packages/coding-agent/src/extensions/codemode/execute.ts
++++ b/packages/coding-agent/src/extensions/codemode/execute.ts
+@@ -20,7 +20,7 @@ import {
+ 	CodemodeSandbox,
+ 	type CodemodeTool,
+ 	loadQuickJSWasm,
+-	parseCodemodeSource,
++	parseScriptSource,
+ 	renderToolSample,
+ 	toCodemodeIdentifier,
+ } from "@earendil-works/pi-codemode";
+@@ -41,6 +41,7 @@ import {
+ 	type CodemodeToolInput,
+ 	type CodemodeToolOptions,
+ 	getCodemodeCallableTools,
++	scriptStatusLine,
+ 	toCodemodeDeclaration,
+ } from "./tool.ts";
+ 
+@@ -57,9 +58,9 @@ const CODEMODE_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
+ // Shared across calls and sessions. Allow one replacement while a cancelled worker is still exiting.
+ const DEFAULT_MAX_CODEMODE_WORKERS = 2;
+ 
+-/** `PI_CODEMODE_MAX_WORKERS` if it is a positive integer. Read per call so SDK hosts can set it at runtime. */
++/** `REEF_CODEMODE_MAX_WORKERS` if it is a positive integer. Read per call so SDK hosts can set it at runtime. */
+ function maxCodemodeWorkers(): number {
+-	const value = Number(process.env.PI_CODEMODE_MAX_WORKERS);
++	const value = Number(process.env.REEF_CODEMODE_MAX_WORKERS);
+ 	return Number.isInteger(value) && value > 0 ? value : DEFAULT_MAX_CODEMODE_WORKERS;
+ }
+ /**
+@@ -498,7 +499,12 @@ export async function executeCodemode(
+ 	options: CodemodeToolOptions = {},
+ ): Promise<AgentToolResult<CodemodeToolDetails>> {
+ 	const startedAt = performance.now();
+-	const { code, options: sourceOptions } = parseCodemodeSource(input.code);
++	const parsed = parseScriptSource(input.script);
++	const { code, options: sourceOptions } = parsed;
++	const inputs: Record<string, string> = {};
++	for (const block of parsed.inputs) inputs[block.name] = block.value;
++	/** Bytes of nested tool output handed to the script, for the status line. */
++	let passthroughBytes = 0;
+ 	const calls: CodemodeNestedCall[] = [];
+ 	// Usage of the script's `models.*` calls. Nested tool calls report theirs through the session.
+ 	let modelUsage: Usage | undefined;
+@@ -538,6 +544,7 @@ export async function executeCodemode(
+ 			// Only tools from ctx.tools are callable, so ctx is set here.
+ 			if (!ctx) throw new Error("Tool calls need a session");
+ 			const outcome = await ctx.executeTool(tool.name, args, { signal: callSignal });
++			passthroughBytes += textOf(outcome.result).length;
+ 			record.id = outcome.toolCall.id;
+ 			record.durationMs = performance.now() - callStartedAt;
+ 			if (outcome.isError) {
+@@ -601,7 +608,7 @@ export async function executeCodemode(
+ 			},
+ 		});
+ 		const store = ctx ? readCodemodeStore(ctx.sessionManager.getBranch()) : {};
+-		result = await sandbox.execute(code, { signal, store });
++		result = await sandbox.execute(code, { signal, store, ...(Object.keys(inputs).length > 0 ? { inputs } : {}) });
+ 	} finally {
+ 		await sandbox?.close();
+ 		if (reserved) {
+@@ -640,7 +647,7 @@ export async function executeCodemode(
+ 	// next to its image and is never cut.
+ 	const output = joinAdjacentText(await saveImages(truncated.items));
+ 	const wallTime = ((performance.now() - startedAt) / 1000).toFixed(1);
+-	const header = `${result.ok ? "Script completed" : "Script failed"}\nWall time ${wallTime} seconds\nOutput:\n`;
++	const header = scriptStatusLine(result.ok, calls, passthroughBytes, Number(wallTime));
+ 	const details = snapshot();
+ 	if (truncated.fullOutputPath) details.fullOutputPath = truncated.fullOutputPath;
+ 	return {
+diff --git a/packages/coding-agent/src/extensions/codemode/index.ts b/packages/coding-agent/src/extensions/codemode/index.ts
+index 67492b6..c49dca1 100644
+--- a/packages/coding-agent/src/extensions/codemode/index.ts
++++ b/packages/coding-agent/src/extensions/codemode/index.ts
+@@ -10,6 +10,7 @@ import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types
+ import { SETTINGS_DEFAULTS } from "../../core/settings-defaults.ts";
+ import type { CodemodeMode } from "../../core/settings-manager.ts";
+ import { createCodemodeToolDefinition } from "./tool.ts";
++import { createWaitForScriptToolDefinition } from "./wait.ts";
+ 
+ export interface CodemodeExtensionOptions {
+ 	/** Overrides the `codemode.mode` setting. */
+@@ -34,6 +35,7 @@ export function createCodemodeExtension(options: CodemodeExtensionOptions = {}):
+ 		pi.registerTool({
+ 			...createCodemodeToolDefinition({
+ 				appendEntry: (customType, data) => pi.appendEntry(customType, data),
++				sendMessage: (message, options) => pi.sendMessage(message, options),
+ 				models: options.models ?? true,
+ 				getToolNamespace: (name) => pi.getAllTools().find((tool) => tool.name === name)?.namespace,
+ 				getToolGuidelines: () =>
+@@ -41,7 +43,12 @@ export function createCodemodeExtension(options: CodemodeExtensionOptions = {}):
+ 				getMode: () => options.mode ?? readMode(pi),
+ 				getInlineBudget: () => options.inlineBudget ?? readInlineBudget(pi),
+ 			}),
+-			defaultActive: false,
++			defaultActive: true,
++		});
++		// `wait_for_script` is the declared partner of `script` and ships with it.
++		pi.registerTool({
++			...createWaitForScriptToolDefinition(),
++			defaultActive: true,
+ 		});
+ 	};
+ }
+diff --git a/packages/coding-agent/src/extensions/codemode/jobs.ts b/packages/coding-agent/src/extensions/codemode/jobs.ts
+new file mode 100644
+index 0000000..8230e63
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/codemode/jobs.ts
+@@ -0,0 +1,128 @@
++/**
++ * Background script jobs. A `script` call whose source carries
++ * `// @script: {"startInBackground": true}` returns as soon as it starts, and the run continues
++ * under an id that `wait_for_script` can wait on, poll, or kill.
++ *
++ * The registry is process-local and in memory. Runs are also written to the session as
++ * `script-job` custom entries, so a resumed session can report a job as `interrupted` instead of
++ * pretending it is still running.
++ */
++
++import type { AgentToolResult } from "@earendil-works/pi-agent-core";
++import type { CodemodeNestedCall } from "./tool.ts";
++
++export type ScriptJobStatus = "running" | "done" | "failed" | "killed" | "interrupted";
++
++export interface ScriptJobDetail {
++	calls: CodemodeNestedCall[];
++	fullOutputPath?: string;
++}
++
++export interface ScriptJob {
++	id: string;
++	/** The tool call that started it, so a resumed session can match it. */
++	sourceToolCallId: string;
++	startedAt: number;
++	finishedAt?: number;
++	status: ScriptJobStatus;
++	/** Number of nested calls issued so far. */
++	calls: number;
++	/** Whether a caller is already waiting, so completion does not need a wake message. */
++	awaiting: boolean;
++	promise: Promise<AgentToolResult<ScriptJobDetail>>;
++	abort: AbortController;
++}
++
++/** Session custom-entry type holding one job's start and finish. */
++export const SCRIPT_JOB_ENTRY_TYPE = "script-job";
++
++export interface ScriptJobEntryData {
++	id: string;
++	sourceToolCallId: string;
++	status: ScriptJobStatus;
++	startedAt: number;
++	finishedAt?: number;
++	calls: number;
++}
++
++const jobs = new Map<string, ScriptJob>();
++let counter = 0;
++
++export function newJobId(): string {
++	counter += 1;
++	return `job-${counter}-${Math.random().toString(36).slice(2, 8)}`;
++}
++
++export function createJob(id: string, sourceToolCallId: string, abort: AbortController): ScriptJob {
++	const job: ScriptJob = {
++		id,
++		sourceToolCallId,
++		startedAt: Date.now(),
++		status: "running",
++		calls: 0,
++		awaiting: false,
++		promise: Promise.resolve({ content: [], details: { calls: [] } }),
++		abort,
++	};
++	jobs.set(id, job);
++	return job;
++}
++
++export function getJob(id: string): ScriptJob | undefined {
++	return jobs.get(id);
++}
++
++export function listJobs(): ScriptJob[] {
++	return [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt);
++}
++
++export function runningJobs(): ScriptJob[] {
++	return listJobs().filter((job) => job.status === "running");
++}
++
++export function finishJob(job: ScriptJob, status: ScriptJobStatus): void {
++	if (job.status !== "running") return;
++	job.status = status;
++	job.finishedAt = Date.now();
++}
++
++/** Mark every job as interrupted. Called when a session is resumed: the process that ran them is gone. */
++export function markInterrupted(): ScriptJobEntryData[] {
++	const interrupted: ScriptJobEntryData[] = [];
++	for (const job of jobs.values()) {
++		if (job.status !== "running") continue;
++		job.status = "interrupted";
++		job.finishedAt = Date.now();
++		interrupted.push(toEntryData(job));
++	}
++	return interrupted;
++}
++
++export function toEntryData(job: ScriptJob): ScriptJobEntryData {
++	return {
++		id: job.id,
++		sourceToolCallId: job.sourceToolCallId,
++		status: job.status,
++		startedAt: job.startedAt,
++		...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
++		calls: job.calls,
++	};
++}
++
++/** `4.2s`, `1m 03s`, `2h 07m`. */
++export function formatDuration(ms: number): string {
++	const seconds = Math.max(0, Math.round(ms / 100) / 10);
++	if (seconds < 60) return `${seconds.toFixed(1)}s`;
++	const totalSeconds = Math.round(seconds);
++	const minutes = Math.floor(totalSeconds / 60);
++	if (minutes < 60) return `${minutes}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
++	const hours = Math.floor(minutes / 60);
++	return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
++}
++
++/** `512 B`, `12.3 KiB`, `1.4 MiB`, for the "passed through unfiltered" figure. */
++export function formatBytes(bytes: number): string {
++	if (bytes < 1024) return `${bytes} B`;
++	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
++	return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
++}
+diff --git a/packages/coding-agent/src/extensions/codemode/tool.ts b/packages/coding-agent/src/extensions/codemode/tool.ts
+index 648ba61..1e87da1 100644
+--- a/packages/coding-agent/src/extensions/codemode/tool.ts
++++ b/packages/coding-agent/src/extensions/codemode/tool.ts
+@@ -33,10 +33,13 @@ import type { ModelRegistry } from "../../core/model-registry.ts";
+ import { SETTINGS_DEFAULTS } from "../../core/settings-defaults.ts";
+ import type { CodemodeMode } from "../../core/settings-manager.ts";
+ import { type TypeBoxAgentTool, wrapToolDefinition } from "../../core/tools/tool-definition-wrapper.ts";
++import { createJob, finishJob, formatBytes, formatDuration, newJobId, SCRIPT_JOB_ENTRY_TYPE, toEntryData } from "./jobs.ts";
+ import { loadCodemodeExecutor } from "./execute.lazy.ts";
+ import { codemodeRenderers } from "./renderer.ts";
+ 
+-export const CODEMODE_TOOL_NAME = "codemode";
++export const CODEMODE_TOOL_NAME = "script";
++/** `wait_for_script` is the declared pair of `script`. */
++export const WAIT_TOOL_NAME = "wait_for_script";
+ 
+ /** Custom entry type holding one script's `store()` writes: {@link CodemodeStoreEntryData}. */
+ export const CODEMODE_STORE_ENTRY_TYPE = "codemode-store";
+@@ -66,7 +69,9 @@ export interface CodemodeToolOptions {
+ 	 * Persists `store()` writes as a session custom entry. Without it, writes last only for the
+ 	 * current script; `load()` still reads entries already on the branch.
+ 	 */
+-	appendEntry?: (customType: string, data: CodemodeStoreEntryData) => void;
++	appendEntry?: (customType: string, data: CodemodeStoreEntryData | unknown) => void;
++	/** Sends a custom message to the session; used to wake the model when a background script ends. */
++	sendMessage?: (message: any, options?: { deliverAs?: "steer" | "followUp" | "nextTurn"; triggerTurn?: boolean }) => void;
+ 	/** How the tool presents the loadout while active (the `codemode.mode` setting). Default: `on`. */
+ 	getMode?: () => CodemodeMode;
+ 	/** Token budget for tool declarations in the description. Default: {@link DEFAULT_CODEMODE_INLINE_BUDGET}. */
+@@ -76,8 +81,9 @@ export interface CodemodeToolOptions {
+ const TEXT_OUTPUT_SCHEMA: CodemodeJsonSchema = { type: "string" };
+ 
+ export const codemodeSchema = Type.Object({
+-	code: Type.String({
+-		description: "Raw JavaScript source.",
++	script: Type.String({
++		description:
++			"JavaScript source, run as an async function body. Not JSON, no code fence. Input text goes in `// @input: name <<'EOF'` blocks and is read as `inputs.name`.",
+ 	}),
+ });
+ 
+@@ -105,26 +111,58 @@ export interface CodemodeToolDetails {
+ 	fullOutputPath?: string;
+ }
+ 
++/**
++ * The one-line status a script result starts with, so the model and the user see the same thing:
++ *
++ *   [Script completed · 4 calls · 12.3 KiB passed through unfiltered · 8.1s]
++ *   [Script failed · before any call · 0.2s]
++ *   [Script failed · after call 3 (read) · 3 calls · 4.0 KiB passed through unfiltered · 8.1s]
++ *
++ * A single call script says `1 call` and omits the passthrough figure: nothing was passed through.
++ */
++export function scriptStatusLine(
++	ok: boolean,
++	calls: readonly CodemodeNestedCall[],
++	passthroughBytes: number,
++	seconds: number,
++): string {
++	const parts: string[] = [ok ? "Script completed" : "Script failed"];
++	const last = calls[calls.length - 1];
++	if (!ok) {
++		parts.push(last ? `after call ${calls.length} (${last.name})` : "before any call");
++	}
++	if (calls.length > 0) parts.push(`${calls.length} ${calls.length === 1 ? "call" : "calls"}`);
++	if (passthroughBytes > 0 && calls.length > 1) {
++		parts.push(`${formatBytes(passthroughBytes)} passed through unfiltered`);
++	}
++	parts.push(`${seconds.toFixed(1)}s`);
++	return `[${parts.join(" · ")}]`;
++}
++
+ export const codemodeToolSystemPromptContribution = {
+-	snippet: "Run JavaScript that calls other tools",
++	snippet: "Run one script that calls several tools",
+ 	guidelines: [
+-		"Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls.",
++		"Reach for `script` when a step needs three or more tool calls, a loop over discovered results, or a filter that would otherwise put megabytes through the transcript. One call at a time stays a direct call.",
++		"Put long inputs in `// @input: name <<'EOF'` blocks and read `inputs.name`, never inline them in the code.",
+ 	],
+ } as const;
+ 
+ /** The reference for scripts: globals, tool results, `store()`, the `models` API, and limits. */
+ export const CODEMODE_DOCS_PATH = join(getDocsPath(), "codemode.md");
+ 
+-const DESCRIPTION_INTRO = `Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level \`await\` and \`return\` work. No Node, file system, network, or timers.
+-- \`await tools.<name>({ ...args })\` resolves to a string, or an object if the tool's declaration says so, and rejects with an Error on failure. A tool whose declaration returns an object resolves on failure too when it returned that object; check its fields. Calls still running when the script ends are cancelled.
+-- Optional first line: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\``;
++const DESCRIPTION_INTRO = `Run one script that calls several tools. The input is JavaScript (not JSON, no code fence), run as an async function body: top-level \`await\` and \`return\` work. No imports, no file system, no network, no \`fetch\`.
++- \`await tools.<tool>({ ...args })\` calls a tool. It resolves to the tool's output (a string, or an object when the declaration says so) and rejects with an Error when the call fails or is denied.
++- Batch independent calls with \`Promise.allSettled\`; loop when the data decides the next call. Do not write a script for a single call: one direct call costs less.
++- First line, optional: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\` (\`// @script:\` is an alias). \`startInBackground\` continues the script after the tool returns.
++- Long input text (a file body, a patch, a heredoc) goes in an input block instead of inside the code: \`// @input: patch <<'EOF'\` then the text, then a line with only \`EOF\`. Read it as \`inputs.patch\`. Blocks must be closed and are removed before the script runs.`;
+ 
+ /** One line per global. The details live in {@link CODEMODE_DOCS_PATH}. */
+ function describeGlobals(models: boolean): string {
+ 	const lines = [
+ 		"Globals:",
+ 		"- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. With several text items, each starts with a `==> text N/M <==` line, and `console` lines follow the other output in one `<console_output>` block. `image()` also saves the image to a temp file and the result names its path.",
+-		"- `store(key, value)` and `load(key)` keep JSON values across codemode calls.",
++		"- `inputs.<name>` holds each `// @input:` block as a string; the object is frozen and never contains anything else.",
++		"- `store(key, value)` and `load(key)` keep JSON values across script calls.",
+ 		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
+ 	];
+ 	if (models) {
+@@ -351,7 +389,14 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+ 			if (callableNames.has(tool.name)) descriptions[tool.name] = describeScriptCall(tool);
+ 		}
+ 	}
+-	const listed = mode === "only" ? callable : callable.filter((tool) => !isDirect(tool));
++	// Direct tools stay out of the listing while they have their own declaration: repeating them
++	// would spend the budget twice. A direct tool whose declaration is hidden has no other way to be
++	// found, so it is listed here.
++	const hiddenNow = new Set<string>(
++		mode === "only" ? [] : loadout.declared.filter((tool) => isDirect(tool)).map((tool) => tool.name),
++	);
++	const listed =
++		mode === "only" ? callable : callable.filter((tool) => !isDirect(tool) || hiddenNow.has(tool.name));
+ 	const namespaces = new Map(
+ 		listed.flatMap((tool) => {
+ 			const namespace = loadout.getNamespace(tool.name);
+@@ -369,13 +414,21 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+ 		inlineBudget: options.getInlineBudget?.() ?? DEFAULT_CODEMODE_INLINE_BUDGET,
+ 	});
+ 	const declaredNames = new Set(loadout.declared.map((tool) => tool.name));
+-	return {
+-		descriptions,
+-		hiddenDeclarations:
+-			mode === "only"
+-				? callable.filter((tool) => isDirect(tool) && declaredNames.has(tool.name)).map((tool) => tool.name)
+-				: [],
+-	};
++	// REEF: the declared surface is `script` and `wait_for_script`. Every other direct tool stays
++	// active and callable from a script, but its declaration is left out, which is where most of the
++	// prompt budget comes from. `codemode.mode = "on"` keeps the old behaviour.
++	const hidden = new Set<string>(
++		mode === "only"
++			? callable.filter((tool) => isDirect(tool) && declaredNames.has(tool.name)).map((tool) => tool.name)
++			: [],
++	);
++	if (mode === "on") {
++		for (const tool of loadout.declared) {
++			if (tool.name === CODEMODE_TOOL_NAME || tool.name === WAIT_TOOL_NAME) continue;
++			if (isDirect(tool)) hidden.add(tool.name);
++		}
++	}
++	return { descriptions, hiddenDeclarations: [...hidden] };
+ }
+ 
+ /** Script globals that list or look up tools and namespaces, which the script may then call by any name. */
+@@ -391,6 +444,33 @@ function getScriptReach(code: unknown): "all" | readonly string[] {
+ 	return DISCOVERY_GLOBALS.test(code) ? "all" : (code.match(/\w+/g) ?? []);
+ }
+ 
++/** Whether the source's first line asks for a background run. */
++function wantsBackground(source: string): boolean {
++	const first = source.trimStart().slice(0, 200);
++	return /^\/\/\s*@(script|options):\s*\{[^}]*"startInBackground"\s*:\s*true/.test(first);
++}
++
++/** Tell the model a background script ended, when nobody was waiting on it. */
++function notifyFinish(
++	options: CodemodeToolOptions,
++	job: { id: string; status: string; startedAt: number },
++	result: { content?: readonly unknown[]; isError?: boolean },
++): void {
++	const text = (result.content ?? [])
++		.map((item) => (typeof item === "object" && item !== null && "text" in item ? String((item as { text: unknown }).text) : ""))
++		.join("\n")
++		.trim();
++	options.sendMessage?.(
++		{
++			customType: SCRIPT_JOB_ENTRY_TYPE,
++			content: [{ type: "text", text: `Background script ${job.id} finished (${job.status}, ${formatDuration(Date.now() - job.startedAt)}).\n\n${text}` }],
++			display: false,
++			details: { jobId: job.id, status: job.status },
++		},
++		{ deliverAs: "followUp", triggerTurn: true },
++	);
++}
++
+ export function createCodemodeToolDefinition(
+ 	options: CodemodeToolOptions = {},
+ ): ToolDefinition<typeof codemodeSchema, CodemodeToolDetails | undefined> {
+@@ -404,13 +484,63 @@ export function createCodemodeToolDefinition(
+ 		parameters: codemodeSchema,
+ 		// Scripts must not start other scripts.
+ 		exposure: "model-only",
++		defaultActive: true,
+ 		prepareLoadout: (loadout) => prepareCodemodeLoadout(loadout, options),
+-		reachesTools: (input) => getScriptReach(input.code),
++		reachesTools: (input) => getScriptReach(String(input.script ?? "")),
+ 		// Capable models write the script as raw text instead of a JSON-escaped string.
+ 		constrainedSampling: { type: "grammar", variants: { openai_lark: CODEMODE_SOURCE_GRAMMAR } },
+ 		// The sandbox (worker, QuickJS wasm) loads on the first call, not at startup.
+-		execute: async (toolCallId, params, signal, onUpdate, ctx) =>
+-			(await loadCodemodeExecutor()).executeCodemode(toolCallId, params, signal, onUpdate, ctx, options),
++		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
++			const execute = await loadCodemodeExecutor();
++			if (!wantsBackground(params.script)) {
++				return execute.executeCodemode(toolCallId, params, signal, onUpdate, ctx, options);
++			}
++			// Background: return the job id now, keep the run going, and wake the model when it ends.
++			const id = newJobId();
++			const abort = new AbortController();
++			const job = createJob(id, toolCallId, abort);
++			if (signal) {
++				if (signal.aborted) abort.abort(signal.reason);
++				else signal.addEventListener("abort", () => abort.abort(signal.reason), { once: true });
++			}
++			options.appendEntry?.(SCRIPT_JOB_ENTRY_TYPE, toEntryData(job));
++			let lastCalls = 0;
++			const track = (result: { details?: { calls?: readonly unknown[] } } | undefined) => {
++				const calls = result?.details?.calls?.length ?? 0;
++				if (calls !== lastCalls) {
++					lastCalls = calls;
++					job.calls = calls;
++				}
++			};
++			job.promise = execute
++				.executeCodemode(toolCallId, params, abort.signal, (result) => track(result), ctx, options)
++				.then((result) => {
++					const failed = result.isError === true;
++					finishJob(job, abort.signal.aborted ? "killed" : failed ? "failed" : "done");
++					lastCalls = result.details?.calls?.length ?? lastCalls;
++					job.calls = lastCalls;
++					options.appendEntry?.(SCRIPT_JOB_ENTRY_TYPE, toEntryData(job));
++					if (!job.awaiting) notifyFinish(options, job, result);
++					return result;
++				})
++				.catch((error: unknown) => {
++					finishJob(job, abort.signal.aborted ? "killed" : "failed");
++					options.appendEntry?.(SCRIPT_JOB_ENTRY_TYPE, toEntryData(job));
++					const text = error instanceof Error ? error.message : String(error);
++					const result = { content: [{ type: "text" as const, text: `[Script failed · after call ${job.calls} · ${formatDuration(Date.now() - job.startedAt)}]\n\nScript error:\n${text}` }], details: { calls: [] }, isError: true };
++					if (!job.awaiting) notifyFinish(options, job, result);
++					return result;
++				});
++			return {
++				content: [
++					{
++						type: "text" as const,
++						text: `[Script started · ${id} · running in the background]\n\nCall wait_for_script({ toolCallId: "${id}" }) to wait for it, or { action: "status" } to poll it.`,
++					},
++				],
++				details: { calls: [] },
++			};
++		},
+ 		...codemodeRenderers,
+ 	};
+ }
+diff --git a/packages/coding-agent/src/extensions/codemode/wait.ts b/packages/coding-agent/src/extensions/codemode/wait.ts
+new file mode 100644
+index 0000000..be1fc40
+--- /dev/null
++++ b/packages/coding-agent/src/extensions/codemode/wait.ts
+@@ -0,0 +1,142 @@
++/**
++ * `wait_for_script`: the declared partner of `script`.
++ *
++ * A background script starts, the model gets a job id, and this tool decides when the model looks
++ * again. Three actions: `wait` (default) blocks until the run ends or the window closes, `status`
++ * reports without blocking, `kill` aborts.
++ *
++ * Waiting is bounded on purpose. A closed window returns the partial output and the job id, so the
++ * model can keep working and come back, instead of the whole turn stalling on one long script.
++ */
++
++import { type Static, Type } from "typebox";
++import type { ToolDefinition } from "../../core/extensions/types.ts";
++import { formatBytes, formatDuration, getJob, SCRIPT_JOB_ENTRY_TYPE, listJobs } from "./jobs.ts";
++
++export const waitForScriptSchema = Type.Object({
++	toolCallId: Type.String({
++		description: "Job id returned by `script` when the source asked for `startInBackground`.",
++	}),
++	action: Type.Optional(
++		Type.Union([Type.Literal("wait"), Type.Literal("status"), Type.Literal("kill")], {
++			description: "`wait` (default) blocks until the run ends or the window closes. `status` returns now. `kill` aborts the run.",
++		}),
++	),
++	timeout_ms: Type.Optional(
++		Type.Number({
++			description: "How long `wait` may block, in milliseconds. Default 120000. Clamped to 600000.",
++		}),
++	),
++});
++
++export type WaitForScriptInput = Static<typeof waitForScriptSchema>;
++
++const DEFAULT_WAIT_MS = 120_000;
++const MAX_WAIT_MS = 600_000;
++
++function text(value: string) {
++	return { type: "text" as const, text: value };
++}
++
++function statusLine(job: ReturnType<typeof getJob>): string {
++	if (!job) return "[Script unknown · no job with that id]";
++	const elapsed = formatDuration((job.finishedAt ?? Date.now()) - job.startedAt);
++	const calls = `${job.calls} ${job.calls === 1 ? "call" : "calls"}`;
++	switch (job.status) {
++		case "running":
++			return `[Script running · ${calls} · ${elapsed}]`;
++		case "done":
++			return `[Script completed · ${calls} · ${elapsed}]`;
++		case "failed":
++			return `[Script failed · ${calls} · ${elapsed}]`;
++		case "killed":
++			return `[Script killed · ${calls} · ${elapsed}]`;
++		case "interrupted":
++			return `[Script interrupted · ${calls} · ${elapsed} · the process that ran it is gone]`;
++	}
++}
++
++function resultText(result: { content?: readonly unknown[] }): string {
++	return (result.content ?? [])
++		.map((item) =>
++			typeof item === "object" && item !== null && "text" in item ? String((item as { text: unknown }).text) : "",
++		)
++		.join("\n")
++		.trim();
++}
++
++export function createWaitForScriptToolDefinition(): ToolDefinition<typeof waitForScriptSchema> {
++	return {
++		name: "wait_for_script",
++		label: "wait_for_script",
++		description: `Wait on a background script started with \`// @script: {"startInBackground": true}\`.
++
++- \`{ toolCallId }\` waits up to \`timeout_ms\` (default 120000, max 600000) for the run to end, then returns its full result. If the window closes first you get the partial output and the same job id: wait again rather than restarting the script.
++- \`{ toolCallId, action: "status" }\` returns the status line now, for a run you do not want to block on.
++- \`{ toolCallId, action: "kill" }\` aborts the run. Calls already finished keep their effects.
++
++A script left running when the turn ends keeps running; its result arrives as a follow-up message.`,
++		promptSnippet: "Wait for, poll, or kill a background script",
++		promptGuidelines: [
++			"Only use `wait_for_script` after a `script` call that returned a job id. A script you awaited directly has already finished.",
++		],
++		parameters: waitForScriptSchema,
++		defaultActive: true,
++		exposure: "model-only",
++		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
++			const job = getJob(params.toolCallId);
++			if (!job) {
++				const running = listJobs().filter((entry) => entry.status === "running");
++				const hint =
++					running.length === 0
++						? " No background script is running."
++						: ` Running: ${running.map((entry) => entry.id).join(", ")}.`;
++				return { content: [text(`[Script unknown · no job with id "${params.toolCallId}"]${hint}`)], details: undefined, isError: true };
++			}
++			const action = params.action ?? "wait";
++
++			if (action === "status") {
++				return { content: [text(statusLine(job))], details: undefined };
++			}
++			if (action === "kill") {
++				job.abort.abort(new Error("Killed by wait_for_script"));
++				return { content: [text(`${statusLine(job)}\n\nThe run was aborted. Calls already finished keep their effects.`)], details: undefined };
++			}
++
++			const timeoutMs = Math.min(Math.max(params.timeout_ms ?? DEFAULT_WAIT_MS, 1), MAX_WAIT_MS);
++			let timer: ReturnType<typeof setTimeout> | undefined;
++			const closed = new Promise<"window">((resolve) => {
++				timer = setTimeout(() => resolve("window"), timeoutMs);
++			});
++			job.awaiting = true;
++			let outcome: "finished" | "window";
++			try {
++				outcome = await Promise.race([job.promise.then(() => "finished" as const), closed]);
++			} finally {
++				if (timer) clearTimeout(timer);
++				job.awaiting = false;
++			}
++			if (outcome === "window") {
++				return {
++					content: [
++						text(
++							`${statusLine(job)}\n\nThe wait window closed before the run ended. It is still running as ${job.id}: call \`wait_for_script\` again, or \`{ action: "kill" }\` to stop it.`,
++						),
++					],
++					details: undefined,
++				};
++			}
++			const result = await job.promise;
++			const body = resultText(result);
++			const calls = job.calls;
++			const header = `${statusLine(job).slice(0, -1)} · ${calls === 1 ? "1 call" : `${calls} calls`}]`;
++			const passthrough = (result as { details?: { passthroughBytes?: number } }).details?.passthroughBytes;
++			const size = typeof passthrough === "number" ? ` · ${formatBytes(passthrough)} passed through unfiltered` : "";
++			return {
++				content: [text(`${header.replace("]", `${size}]`)}\n\n${body.replace(/^\[[^\]]*\]\n*/, "")}`.trim())],
++				details: result.details,
++				isError: result.isError === true,
++			};
++		},
++	};
++}
+diff --git a/packages/coding-agent/src/extensions/llama/index.ts b/packages/coding-agent/src/extensions/llama/index.ts
+index 1e3b9ce..8dea93a 100644
+--- a/packages/coding-agent/src/extensions/llama/index.ts
++++ b/packages/coding-agent/src/extensions/llama/index.ts
+@@ -53,7 +53,7 @@ export default function llamaExtension(pi: ExtensionAPI): void {
+ 		provider.setCatalog(current, client.serverUrl);
+ 		const result = await ctx.modelRegistry.refresh({
+ 			providers: [LLAMA_PROVIDER_ID],
+-			// /llama already contacted the configured llama.cpp server, so keep this refresh live even in PI_OFFLINE.
++			// /llama already contacted the configured llama.cpp server, so keep this refresh live even in REEF_OFFLINE.
+ 			allowNetwork: true,
+ 			signal,
+ 		});
+diff --git a/packages/coding-agent/src/extensions/mcp/oauth.ts b/packages/coding-agent/src/extensions/mcp/oauth.ts
+index 5a6aba3..faf7237 100644
+--- a/packages/coding-agent/src/extensions/mcp/oauth.ts
++++ b/packages/coding-agent/src/extensions/mcp/oauth.ts
+@@ -157,13 +157,13 @@ export class McpOAuthCredentialStore {
+ }
+ 
+ /** pi's Client ID Metadata Documents on pi.dev: `client.json` and `<callback ID>/client.json`. */
+-const PI_CLIENT_METADATA_DOCUMENTS: McpClientMetadataDocuments = {
++const REEF_CLIENT_METADATA_DOCUMENTS: McpClientMetadataDocuments = {
+ 	baseUrl: "https://pi.dev/oauth",
+ 	listsRedirectUrl: isClientMetadataDocumentCallback,
+ };
+ 
+ /** pi's client identity for sign-in and refresh. */
+-const PI_CLIENT = { clientName: APP_NAME, clientMetadataDocuments: PI_CLIENT_METADATA_DOCUMENTS };
++const REEF_CLIENT = { clientName: APP_NAME, clientMetadataDocuments: REEF_CLIENT_METADATA_DOCUMENTS };
+ 
+ /** `settings` for pi-mcp: a rebranded build would show up as pi with pi's documents, so `auto` registers. */
+ function piSettings(settings: McpOAuthSettings): McpOAuthSettings {
+@@ -178,7 +178,7 @@ export function createMcpAuthProvider(options: {
+ 	settings: () => McpOAuthSettings;
+ 	onChallenge: (challenge: OAuthChallenge) => void;
+ }): McpAuthProvider {
+-	return createAuthProvider({ ...options, ...PI_CLIENT, settings: () => piSettings(options.settings()) });
++	return createAuthProvider({ ...options, ...REEF_CLIENT, settings: () => piSettings(options.settings()) });
+ }
+ 
+ export interface McpSignInPrompt {
+@@ -218,11 +218,11 @@ export async function signInMcpServer(options: {
+ 		serverUrl,
+ 		store,
+ 		settings,
+-		clientMetadataDocuments: PI_CLIENT_METADATA_DOCUMENTS,
++		clientMetadataDocuments: REEF_CLIENT_METADATA_DOCUMENTS,
+ 		renderPage: renderCallbackPage,
+ 	});
+ 	try {
+-		const signIn = { serverUrl, store, settings, redirectUrl, challenge, signal, ...PI_CLIENT };
++		const signIn = { serverUrl, store, settings, redirectUrl, challenge, signal, ...REEF_CLIENT };
+ 		const authorization = await startMcpSignIn(signIn);
+ 		if (authorization.kind === "authorized") return;
+ 		prompt.showAuthorizationUrl(new URL(authorization.authorizationUrl));
+diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
+index 34111cc..8d528f3 100644
+--- a/packages/coding-agent/src/main.ts
++++ b/packages/coding-agent/src/main.ts
+@@ -576,10 +576,10 @@ export async function main(args: string[], options?: MainOptions) {
+ 	// Commands and startup selectors can load user-authored themes before runtime creation.
+ 	setThemeJsonValidator(validateThemeJson);
+ 	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
+-	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
++	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.REEF_OFFLINE);
+ 	if (offlineMode) {
+-		process.env.PI_OFFLINE = "1";
+-		process.env.PI_SKIP_VERSION_CHECK = "1";
++		process.env.REEF_OFFLINE = "1";
++		process.env.REEF_SKIP_VERSION_CHECK = "1";
+ 	}
+ 
+ 	if (await runAuthCommand(args)) {
+@@ -940,9 +940,9 @@ export async function main(args: string[], options?: MainOptions) {
+ 		process.exit(1);
+ 	}
+ 
+-	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
++	const startupBenchmark = isTruthyEnvFlag(process.env.REEF_STARTUP_BENCHMARK);
+ 	if (startupBenchmark && appMode !== "interactive") {
+-		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
++		console.error(chalk.red("Error: REEF_STARTUP_BENCHMARK only supports interactive mode"));
+ 		process.exit(1);
+ 	}
+ 
+diff --git a/packages/coding-agent/src/modes/interactive/bug-report.ts b/packages/coding-agent/src/modes/interactive/bug-report.ts
+index 51034e0..ad3f8b9 100644
+--- a/packages/coding-agent/src/modes/interactive/bug-report.ts
++++ b/packages/coding-agent/src/modes/interactive/bug-report.ts
+@@ -53,7 +53,7 @@ export async function reportBug(context: BugReportContext, initialHint?: string)
+ 		context.showStatus("Bug report cancelled");
+ 		return;
+ 	}
+-	if (options.delivery === "upload" && process.env.PI_OFFLINE) {
++	if (options.delivery === "upload" && process.env.REEF_OFFLINE) {
+ 		context.showError("Uploading bug reports requires online mode. Use Export as Zip instead.");
+ 		return;
+ 	}
+diff --git a/packages/coding-agent/src/modes/interactive/components/reef-logo.ts b/packages/coding-agent/src/modes/interactive/components/reef-logo.ts
+new file mode 100644
+index 0000000..7f8c48e
+--- /dev/null
++++ b/packages/coding-agent/src/modes/interactive/components/reef-logo.ts
+@@ -0,0 +1,39 @@
++import { backgroundAnsi, foregroundAnsi, isAppleTerminalSession, rgbColor } from "@earendil-works/pi-tui";
++import { theme } from "../theme/theme.ts";
++
++/** Reef teal, the single accent (docs/17 §3). */
++const TEAL = rgbColor(94, 200, 192);
++const DEEP = rgbColor(48, 122, 118);
++const RESET = "\x1b[0m";
++
++/**
++ * The reef mark: 4 cells wide and 2 lines tall, built from half blocks.
++ *
++ *   ▄▄▄▄      the surface
++ *   █▄▄█      what is under it
++ *
++ * Colours are fixed across themes and follow the terminal's colour mode.
++ */
++export function reefLogoLines(): [string, string] {
++	const mode = theme.getColorMode();
++	const fg = (color: typeof TEAL) => foregroundAnsi(color, mode);
++	const bg = (color: typeof DEEP) => backgroundAnsi(color, mode);
++	const top = `${fg(TEAL)}▄▄▄▄${RESET}`;
++	const bottom = `${fg(DEEP)}█${RESET}${bg(TEAL)}  ${RESET}${fg(DEEP)}█${RESET}`;
++	return [top, bottom];
++}
++
++/**
++ * Whether the terminal renders the half-block mark correctly. Apple Terminal draws gaps between
++ * rows and misaligns the half blocks, so it gets the text wordmark instead.
++ */
++export function supportsReefLogo(): boolean {
++	return !isAppleTerminalSession();
++}
++
++/** Text fallback: REEF in the accent colour and a dimmer second half. */
++export function reefWordmark(): string {
++	const mode = theme.getColorMode();
++	const fg = (color: typeof TEAL) => foregroundAnsi(color, mode);
++	return `${fg(TEAL)}REEF${RESET}`;
++}
+diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+index 268a7fa..9bd5c3e 100644
+--- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+@@ -163,7 +163,7 @@ import {
+ 	formatAuthSelectorProviderType,
+ 	OAuthSelectorComponent,
+ } from "./components/oauth-selector.ts";
+-import { piLogoLines, piWordmark, supportsPiLogo } from "./components/pi-logo.ts";
++import { reefLogoLines, reefWordmark, supportsReefLogo } from "./components/reef-logo.ts";
+ import { createLoginMenuSelector } from "./components/radius-login-selector.ts";
+ import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
+ import { SessionSelectorComponent } from "./components/session-selector.ts";
+@@ -1035,10 +1035,10 @@ export class InteractiveMode {
+ 			// Built on demand so the header follows theme changes. The logo's first line carries the version,
+ 			// its second line the first line of key hints. Terminals that cannot render the logo get a
+ 			// "Pi vX" line instead, with the key hints below it.
+-			const showLogo = supportsPiLogo();
++			const showLogo = supportsReefLogo();
+ 			const withLogo = (hints: string) => {
+-				if (!showLogo) return `${piWordmark()} ${theme.fg("dim", `v${this.version}`)}\n${hints}`;
+-				const [top, bottom] = piLogoLines();
++				if (!showLogo) return `${reefWordmark()} ${theme.fg("dim", `v${this.version}`)}\n${hints}`;
++				const [top, bottom] = reefLogoLines();
+ 				return `${top} ${theme.fg("dim", `v${this.version}`)}\n${bottom} ${hints}`;
+ 			};
+ 
+@@ -1171,7 +1171,7 @@ export class InteractiveMode {
+ 	async run(): Promise<void> {
+ 		await this.init();
+ 
+-		if (!process.env.PI_OFFLINE) {
++		if (!process.env.REEF_OFFLINE) {
+ 			const controller = new AbortController();
+ 			const timeout = setTimeout(() => controller.abort(), 15_000);
+ 			void refreshModelCatalogs(this.session.modelRuntime, controller.signal)
+@@ -1286,7 +1286,7 @@ export class InteractiveMode {
+ 	}
+ 
+ 	private async checkForPackageUpdates(): Promise<string[]> {
+-		if (process.env.PI_OFFLINE) {
++		if (process.env.REEF_OFFLINE) {
+ 			return [];
+ 		}
+ 
+@@ -1454,7 +1454,7 @@ export class InteractiveMode {
+ 	}
+ 
+ 	private reportInstallTelemetry(version: string): void {
+-		if (process.env.PI_OFFLINE) {
++		if (process.env.REEF_OFFLINE) {
+ 			return;
+ 		}
+ 
+diff --git a/packages/coding-agent/src/package-manager-cli.ts b/packages/coding-agent/src/package-manager-cli.ts
+index 93a8fd4..0cb3444 100644
+--- a/packages/coding-agent/src/package-manager-cli.ts
++++ b/packages/coding-agent/src/package-manager-cli.ts
+@@ -56,7 +56,7 @@ const MANAGED_INSTALL_MARKER = "managed-install.json";
+ const MANAGED_RELEASE_VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+ 
+ function getActiveManagedInstallRoot(): string | undefined {
+-	const configuredRoot = process.env.PI_MANAGED_INSTALL_ROOT?.trim();
++	const configuredRoot = process.env.REEF_MANAGED_INSTALL_ROOT?.trim();
+ 	if (!configuredRoot) return undefined;
+ 
+ 	const managedRoot = resolve(configuredRoot);
+@@ -211,7 +211,7 @@ async function runManagedSelfUpdate(managedRoot: string, version: string): Promi
+ 	let stageDir: string | undefined;
+ 	try {
+ 		cleanupManagedStaging(managedRoot);
+-		const installerApiBase = (process.env.PI_INSTALLER_API_BASE?.trim() || DEFAULT_INSTALLER_API_BASE).replace(
++		const installerApiBase = (process.env.REEF_INSTALLER_API_BASE?.trim() || DEFAULT_INSTALLER_API_BASE).replace(
+ 			/\/+$/,
+ 			"",
+ 		);
+@@ -642,7 +642,7 @@ function printSelfUpdateUnavailable(
+ 	console.error(`error: ${APP_NAME} cannot self-update this installation.`);
+ 	console.error(getSelfUpdateUnavailableInstruction(PACKAGE_NAME, npmCommand, updatePackageTarget));
+ 	console.error(
+-		`To make \`${APP_NAME} update\` run your own update command, set PI_SELF_UPDATE_COMMAND or the selfUpdateCommand setting.`,
++		`To make \`${APP_NAME} update\` run your own update command, set REEF_SELF_UPDATE_COMMAND or the selfUpdateCommand setting.`,
+ 	);
+ 
+ 	const entrypoint = process.argv[1];
+@@ -773,8 +773,8 @@ async function runConfiguredSelfUpdate(argv: string[], plan: SelfUpdatePlan): Pr
+ 
+ /** Version printed by `pi --version` as resolved from PATH, the pi the user runs next. */
+ function readVersionOnPath(): string | undefined {
+-	// PI_PACKAGE_DIR points at this installation and would make the new pi report the old version.
+-	const { PI_PACKAGE_DIR: _, ...env } = process.env;
++	// REEF_PACKAGE_DIR points at this installation and would make the new pi report the old version.
++	const { REEF_PACKAGE_DIR: _, ...env } = process.env;
+ 	const result = spawnProcessSync(APP_NAME, ["--version"], {
+ 		encoding: "utf-8",
+ 		stdio: ["ignore", "pipe", "pipe"],
+diff --git a/packages/coding-agent/src/rpc-entry.ts b/packages/coding-agent/src/rpc-entry.ts
+index 11059a8..03b20c6 100644
+--- a/packages/coding-agent/src/rpc-entry.ts
++++ b/packages/coding-agent/src/rpc-entry.ts
+@@ -4,7 +4,7 @@ import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
+ import { main } from "./main.ts";
+ 
+ process.title = `${APP_NAME}-rpc`;
+-process.env.PI_CODING_AGENT = "true";
++process.env.REEF_CODING_AGENT = "true";
+ process.env.AI_AGENT = "pi";
+ process.emitWarning = (() => {}) as typeof process.emitWarning;
+ 
+diff --git a/packages/coding-agent/src/utils/clipboard.ts b/packages/coding-agent/src/utils/clipboard.ts
+index c1eedc6..67b8fac 100644
+--- a/packages/coding-agent/src/utils/clipboard.ts
++++ b/packages/coding-agent/src/utils/clipboard.ts
+@@ -9,12 +9,12 @@ import { isWSL } from "./wsl.ts";
+ const MAX_OSC52_ENCODED_LENGTH = 100_000;
+ 
+ /**
+- * Remote sessions also emit OSC 52 so the client terminal receives the copy. PI_CLIPBOARD_OSC52=1
++ * Remote sessions also emit OSC 52 so the client terminal receives the copy. REEF_CLIPBOARD_OSC52=1
+  * covers remote clients that leave no SSH markers, such as multiplexer attaches (#10114, #10835)
+  * or IDE daemons (#10826).
+  */
+ function isRemoteSession(env: NodeJS.ProcessEnv): boolean {
+-	return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.MOSH_CONNECTION || env.PI_CLIPBOARD_OSC52 === "1");
++	return Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.MOSH_CONNECTION || env.REEF_CLIPBOARD_OSC52 === "1");
+ }
+ 
+ function emitOsc52(text: string): boolean {
+diff --git a/packages/coding-agent/src/utils/tools-manager.ts b/packages/coding-agent/src/utils/tools-manager.ts
+index a57c4de..6a04d92 100644
+--- a/packages/coding-agent/src/utils/tools-manager.ts
++++ b/packages/coding-agent/src/utils/tools-manager.ts
+@@ -13,7 +13,7 @@ const NETWORK_TIMEOUT_MS = 10_000;
+ const DOWNLOAD_TIMEOUT_MS = 120_000;
+ 
+ function isOfflineModeEnabled(): boolean {
+-	const value = process.env.PI_OFFLINE;
++	const value = process.env.REEF_OFFLINE;
+ 	if (!value) return false;
+ 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
+ }
+diff --git a/packages/coding-agent/src/utils/version-check.ts b/packages/coding-agent/src/utils/version-check.ts
+index a09a3d0..0a4f5ac 100644
+--- a/packages/coding-agent/src/utils/version-check.ts
++++ b/packages/coding-agent/src/utils/version-check.ts
+@@ -52,7 +52,7 @@ export async function getLatestPiRelease(
+ 	currentVersion: string,
+ 	options: { timeoutMs?: number; retry?: boolean } = {},
+ ): Promise<LatestPiRelease | undefined> {
+-	if (process.env.PI_OFFLINE) return undefined;
++	if (process.env.REEF_OFFLINE) return undefined;
+ 
+ 	const response = await fetchWithRetry(
+ 		LATEST_VERSION_URL,
+@@ -95,7 +95,7 @@ export async function getLatestPiVersion(
+ }
+ 
+ export async function checkForNewPiVersion(currentVersion: string): Promise<LatestPiRelease | undefined> {
+-	if (process.env.PI_SKIP_VERSION_CHECK) return undefined;
++	if (process.env.REEF_SKIP_VERSION_CHECK) return undefined;
+ 
+ 	try {
+ 		const latestRelease = await getLatestPiRelease(currentVersion);

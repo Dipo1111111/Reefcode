@@ -1,0 +1,20 @@
+{
+  "name": "reef",
+  "version": "0.1.0-dev",
+  "private": true,
+  "description": "REEF — a coding agent harness. One script, many tool calls.",
+  "license": "MIT",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm --prefix vendor/pi run build",
+    "reef": "apps/reef/bin/reef",
+    "brand:check": "scripts/brand-check.sh",
+    "patch:check": "scripts/patch-check.sh"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

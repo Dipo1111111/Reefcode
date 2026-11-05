@@ -1,0 +1,8 @@
+repo:      https://github.com/badlogic/pi-mono
+commit:    4d72d05
+version:   1.5.0
+date:      2026-11-04
+method:    git archive <commit> | tar -x -C vendor/pi
+note:      This tree is vendored and pristine. It is never edited in place.
+           All changes live in vendor/pi.patch. See AGENTS.md §6 C1 and
+           docs/02-pi-map.md §13.

@@ -1,0 +1,13 @@
+REEF — open-source coding agent harness
+Copyright (c) 2026 REEF contributors
+
+This product includes software developed at
+Earendil Works (https://github.com/badlogic/pi-mono), used under the MIT
+License and vendored at commit 4d72d05 (v1.5.0).
+
+The vendored tree is unmodified except for the changes recorded in
+vendor/pi.patch. The original copyright notice is reproduced in LICENSE
+and in vendor/pi/LICENSE.
+
+REEF is an independent product. It is not affiliated with, endorsed by, or
+sponsored by Earendil Works, Factory AI, or any other organisation.
