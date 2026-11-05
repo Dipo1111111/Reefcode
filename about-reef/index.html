@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>REEF — a coding agent for the terminal</title>
+<meta name="description" content="REEF is an open-source coding agent harness. It reads before it writes, runs commands instead of guessing, and calls its tools from code.">
+<style>
+:root{
+  --paper:#f7f5f1; --ink:#0e1a1b; --dim:#5b6b6d; --line:#e3ded4;
+  --sea:#0f5c58; --foam:#e9f1ef; --sand:#f1ece2; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+body{margin:0;background:var(--paper);color:var(--ink);
+  font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:860px;margin:0 auto;padding:0 24px}
+a{color:var(--sea);text-decoration:none}
+a:hover{text-decoration:underline}
+header{position:sticky;top:0;z-index:9;border-bottom:1px solid var(--line);
+  background:rgba(247,245,241,.88);backdrop-filter:blur(8px)}
+header .wrap{display:flex;align-items:center;gap:20px;height:58px}
+.mark{font-weight:700;letter-spacing:.14em;font-size:13px}
+.mark b{color:var(--sea)}
+header nav{margin-left:auto;display:flex;gap:18px;font-size:14px}
+header nav a{color:var(--dim)}
+header nav a:hover{color:var(--ink)}
+h1{font-size:clamp(30px,6vw,50px);line-height:1.1;letter-spacing:-.025em;margin:0 0 18px;font-weight:680}
+h2{font-size:13px;letter-spacing:.13em;text-transform:uppercase;color:var(--dim);font-weight:600;margin:0 0 26px}
+h3{font-size:17px;margin:0 0 8px;letter-spacing:-.01em}
+p{margin:0 0 16px}
+.hero{padding:84px 0 64px}
+.hero p.lede{font-size:19px;color:#31474a;max-width:620px}
+.accent{color:var(--sea)}
+.cta{display:flex;flex-wrap:wrap;gap:12px;margin-top:30px}
+.btn{display:inline-block;padding:11px 20px;border-radius:7px;font-size:14px;font-weight:600;
+  border:1px solid var(--sea);background:var(--sea);color:#f4fbfa}
+.btn:hover{background:#0c4a47;text-decoration:none}
+.btn.ghost{background:transparent;color:var(--sea);border-color:#cfd8d4}
+.btn.ghost:hover{background:var(--foam);text-decoration:none}
+.term{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#0f1a1c;
+  box-shadow:0 18px 40px -28px rgba(14,26,27,.55);margin:0}
+.term .bar{display:flex;gap:6px;align-items:center;padding:10px 14px;border-bottom:1px solid #1c2a2c;background:#132022}
+.term .bar i{width:9px;height:9px;border-radius:50%;background:#2a3b3e;display:block}
+.term .bar span{margin-left:8px;font:12px/1 var(--mono);color:#6d8285}
+.term pre{margin:0;padding:16px 18px;overflow-x:auto;font:13px/1.75 var(--mono);color:#c8d8d5}
+.term .k{color:#5fb8ad}
+.term .s{color:#d9b26a}
+.term .c{color:#5c7174}
+.term .out{border-top:1px solid #1c2a2c;padding:12px 18px;color:#8fa5a4;font:12.5px/1.7 var(--mono)}
+section{padding:64px 0;border-top:1px solid var(--line)}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}
+.card{background:var(--sand);border:1px solid var(--line);border-radius:10px;padding:22px}
+.card p{margin:0;color:var(--dim);font-size:14.5px}
+.card .n{font:12px/1 var(--mono);color:var(--sea);display:block;margin-bottom:12px}
+ol.rules{list-style:none;counter-reset:r;margin:0;padding:0}
+ol.rules li{counter-increment:r;display:grid;grid-template-columns:38px 1fr;gap:14px;
+  padding:18px 0;border-top:1px solid var(--line)}
+ol.rules li:first-child{border-top:0;padding-top:0}
+ol.rules li::before{content:counter(r,decimal-leading-zero);font:12px/1.9 var(--mono);color:var(--sea);opacity:.7}
+ol.rules p{margin:2px 0 0;color:var(--dim);font-size:15px}
+.start{background:var(--foam);border:1px solid #d3e3df;border-radius:10px;padding:24px}
+.start pre{margin:0 0 6px;font:13.5px/1.9 var(--mono);color:#12403d;overflow-x:auto}
+.start pre .c{color:#5d8b86}
+footer{padding:40px 0 64px;border-top:1px solid var(--line);color:var(--dim);font-size:13.5px}
+footer .wrap{display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between}
+@media (max-width:560px){header nav{display:none}.hero{padding:56px 0 44px}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="mark">RE<b>E</b>F</div>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#rules">Principles</a>
+      <a href="#start">Start</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <div class="hero">
+    <h1>A coding agent for people<br>who live in the <span class="accent">terminal</span>.</h1>
+    <p class="lede">I read the code before I change it, run commands instead of guessing at their
+      output, and keep every step inspectable. My tools are called from code, not one JSON blob
+      at a time — so a whole refactor can be one call, not forty.</p>
+    <div class="cta">
+      <a class="btn" href="#start">Get started</a>
+      <a class="btn ghost" href="#how">See how it works</a>
+    </div>
+  </div>
+
+  <div class="term">
+    <div class="bar"><i></i><i></i><i></i><span>reef — one script call</span></div>
+<pre><span class="k">const</span> hits = <span class="k">await</span> tools.grep({ pattern: <span class="s">"TODO"</span>, path: <span class="s">"src"</span> })
+<span class="k">const</span> files = [...<span class="k">new</span> Set(hits.map(h =&gt; h.file))].slice(0, 3)
+<span class="k">for</span> (<span class="k">const</span> f <span class="k">of</span> files) {
+  <span class="k">const</span> head = <span class="k">await</span> tools.read({ path: f, limit: 40 })
+  text(<span class="s">`### ${f}\n`</span> + head)
+}
+<span class="k">return</span> hits.length</pre>
+    <div class="out">✓ 1 tool call · 7 files read · 0.4 s · 31 lines entered the transcript</div>
+  </div>
+
+  <section id="how">
+    <h2>How it works</h2>
+    <div class="grid">
+      <div class="card">
+        <span class="n">01</span>
+        <h3>Tools from code</h3>
+        <p>Two tools, <code>script</code> and <code>wait_for_script</code>. A script can loop,
+          branch, filter and aggregate — so fifty small steps collapse into one call and one line
+          of result.</p>
+      </div>
+      <div class="card">
+        <span class="n">02</span>
+        <h3>Context is the budget</h3>
+        <p>The transcript stays small on purpose. Requests are append-only, prefixes are cached,
+          and long runs compact instead of drowning. Cheap is a consequence, not a setting.</p>
+      </div>
+      <div class="card">
+        <span class="n">03</span>
+        <h3>Bounded autonomy</h3>
+        <p>I keep going while the work is safe and legible, and stop at the boundary — permission
+          rules, not vibes. Every action is a step you can read back later.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="rules">
+    <h2>Principles</h2>
+    <ol class="rules">
+      <li>
+        <div>
+          <h3>Read before you write</h3>
+          <p>A patch written from memory is a guess. Look first, then edit, then verify.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <h3>Run it, don't describe it</h3>
+          <p>If a command can answer the question, the command runs. Narrated certainty is not evidence.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <h3>Say when you don't know</h3>
+          <p>“Unknown” is a valid answer and a cheap one. Inventing a number is expensive later.</p>
+        </div>
+      </li>
+      <li>
+        <div>
+          <h3>Leave the tree honest</h3>
+          <p>Code, docs and the tracker move together, or the work isn't finished.</p>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <section id="start">
+    <h2>Start</h2>
+    <div class="start">
+<pre><span class="c"># install and launch, in any repo</span>
+reef</pre>
+<pre><span class="c"># or run one task and exit</span>
+reef exec <span class="s">"fix the failing test in src/queue.test.ts"</span></pre>
+      <p style="margin:16px 0 0;color:var(--dim);font-size:14.5px">Open source under the MIT licence.
+        Runs on your machine, in your terminal, against the models you already pay for.</p>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>REEF — an open-source coding agent harness.</span>
+    <span>MIT · built to be read</span>
+  </div>
+</footer>
+
+</body>
+</html>

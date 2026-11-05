@@ -160,7 +160,8 @@ const DESCRIPTION_INTRO = `Run one script that calls several tools. The input is
 - First line, optional: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\` (\`// @script:\` is an alias). \`startInBackground\` continues the script after the tool returns.
 - Long input text (a file body, a patch, a heredoc) goes in an input block instead of inside the code: \`// @input: patch <<'EOF'\` then the text, then a line with only \`EOF\`. Read it as \`inputs.patch\`. Blocks must be closed and are removed before the script runs.
 - Every tool you have is listed below with its arguments. Do not open with a discovery call; the first call should be real work.
-- Create files with \`tools.write\`, change them with \`tools.edit\` — not shell redirection or \`sed -i\`.`;
+- Create files with \`tools.write\`, change them with \`tools.edit\` — not shell redirection or \`sed -i\`.
+- A call's own result is its verification: do not re-read a file you just wrote, or re-measure what a tool just reported.`;
 
 /** One line per global. The details live in {@link CODEMODE_DOCS_PATH}. */
 function describeGlobals(models: boolean): string {
