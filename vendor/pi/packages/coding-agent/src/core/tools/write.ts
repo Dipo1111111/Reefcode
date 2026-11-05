@@ -73,6 +73,9 @@ export function createWriteToolDefinition(
 				};
 
 				throwIfAborted();
+				// Report what the write created, so a new folder does not need a follow-up `ls` to
+				// discover whether it exists: the caller asked for a path and the tool says what it
+				// made.
 				// Create parent directories if needed.
 				await ops.mkdir(dir);
 				throwIfAborted();
@@ -88,7 +91,7 @@ export function createWriteToolDefinition(
 					content: [
 						{
 							type: "text",
-							text: `Successfully wrote to ${path} (${Buffer.byteLength(content, "utf8")} bytes)`,
+							text: `Successfully wrote to ${path} (${Buffer.byteLength(content, "utf8")} bytes; its folders were created as needed)`,
 						},
 					],
 					details: undefined,

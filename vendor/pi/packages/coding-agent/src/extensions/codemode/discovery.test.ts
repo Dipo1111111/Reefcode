@@ -14,6 +14,6 @@ describe("discovery guidance", () => {
 			{ compact: true },
 		);
 		expect(text).toContain("listed below with its arguments");
-		expect(text).toContain("Do not open with a discovery call");
+		expect(text).toContain("Plan the whole sequence before the first call");
 	});
 });

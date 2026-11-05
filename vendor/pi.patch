@@ -2766,10 +2766,20 @@ index 8fb93a6..de1a344 100644
  								const truncation = truncateHead(selectedContent);
  								let outputText: string;
 diff --git a/packages/coding-agent/src/core/tools/write.ts b/packages/coding-agent/src/core/tools/write.ts
-index 9e6b296..c46de82 100644
+index 9e6b296..176ed58 100644
 --- a/packages/coding-agent/src/core/tools/write.ts
 +++ b/packages/coding-agent/src/core/tools/write.ts
-@@ -82,7 +82,15 @@ export function createWriteToolDefinition(
+@@ -73,6 +73,9 @@ export function createWriteToolDefinition(
+ 				};
+ 
+ 				throwIfAborted();
++				// Report what the write created, so a new folder does not need a follow-up `ls` to
++				// discover whether it exists: the caller asked for a path and the tool says what it
++				// made.
+ 				// Create parent directories if needed.
+ 				await ops.mkdir(dir);
+ 				throwIfAborted();
+@@ -82,7 +85,15 @@ export function createWriteToolDefinition(
  				throwIfAborted();
  
  				return {
@@ -2780,7 +2790,7 @@ index 9e6b296..c46de82 100644
 +					content: [
 +						{
 +							type: "text",
-+							text: `Successfully wrote to ${path} (${Buffer.byteLength(content, "utf8")} bytes)`,
++							text: `Successfully wrote to ${path} (${Buffer.byteLength(content, "utf8")} bytes; its folders were created as needed)`,
 +						},
 +					],
  					details: undefined,
@@ -2788,7 +2798,7 @@ index 9e6b296..c46de82 100644
  			});
 diff --git a/packages/coding-agent/src/extensions/codemode/description.test.ts b/packages/coding-agent/src/extensions/codemode/description.test.ts
 new file mode 100644
-index 0000000..0def657
+index 0000000..a67b6b8
 --- /dev/null
 +++ b/packages/coding-agent/src/extensions/codemode/description.test.ts
 @@ -0,0 +1,68 @@
@@ -2847,7 +2857,7 @@ index 0000000..0def657
 +		expect(compact).toBeLessThan(full);
 +		// Real tools carry longer descriptions than these fixtures; the live measurement after this
 +		// change is what confirms the size, not this assertion.
-+		expect(compact).toBeLessThan(700);
++		expect(compact).toBeLessThan(760);
 +	});
 +
 +	it("compact keeps the batching rule, because that is what makes a script worth a turn", () => {
@@ -2862,7 +2872,7 @@ index 0000000..0def657
 +});
 diff --git a/packages/coding-agent/src/extensions/codemode/discovery.test.ts b/packages/coding-agent/src/extensions/codemode/discovery.test.ts
 new file mode 100644
-index 0000000..38bffec
+index 0000000..7b49834
 --- /dev/null
 +++ b/packages/coding-agent/src/extensions/codemode/discovery.test.ts
 @@ -0,0 +1,19 @@
@@ -2882,7 +2892,7 @@ index 0000000..38bffec
 +			{ compact: true },
 +		);
 +		expect(text).toContain("listed below with its arguments");
-+		expect(text).toContain("Do not open with a discovery call");
++		expect(text).toContain("Plan the whole sequence before the first call");
 +	});
 +});
 diff --git a/packages/coding-agent/src/extensions/codemode/execute.ts b/packages/coding-agent/src/extensions/codemode/execute.ts
@@ -3322,7 +3332,7 @@ index 0000000..4bed545
 +	});
 +});
 diff --git a/packages/coding-agent/src/extensions/codemode/tool.ts b/packages/coding-agent/src/extensions/codemode/tool.ts
-index 648ba61..4313a56 100644
+index 648ba61..b5b08df 100644
 --- a/packages/coding-agent/src/extensions/codemode/tool.ts
 +++ b/packages/coding-agent/src/extensions/codemode/tool.ts
 @@ -33,10 +33,13 @@ import type { ModelRegistry } from "../../core/model-registry.ts";
@@ -3369,7 +3379,7 @@ index 648ba61..4313a56 100644
  	}),
  });
  
-@@ -105,27 +115,62 @@ export interface CodemodeToolDetails {
+@@ -105,27 +115,63 @@ export interface CodemodeToolDetails {
  	fullOutputPath?: string;
  }
  
@@ -3422,7 +3432,8 @@ index 648ba61..4313a56 100644
 +- A script earns its turn by doing several calls. Batch independent ones with \`Promise.allSettled\`; loop when the data decides the next call. **A script with one call costs more than calling the tool once** — measured at +40% tokens on small tasks — so do it directly instead.
 +- First line, optional: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\` (\`// @script:\` is an alias). \`startInBackground\` continues the script after the tool returns.
 +- Long input text (a file body, a patch, a heredoc) goes in an input block instead of inside the code: \`// @input: patch <<'EOF'\` then the text, then a line with only \`EOF\`. Read it as \`inputs.patch\`. Blocks must be closed and are removed before the script runs.
-+- Every tool you have is listed below with its arguments. Do not open with a discovery call; the first call should be real work.
++- Every tool you have is listed below with its arguments. Plan the whole sequence before the first call: a turn re-sends the prompt, so dependent steps belong in one script.
++- A new deliverable needs no inspection first. \`write\` creates its folders and reports the size, so write the file and read the result instead of listing the directory to see what exists.
 +- Create files with \`tools.write\`, change them with \`tools.edit\` — not shell redirection or \`sed -i\`.
 +- A call's own result is its verification: do not re-read a file you just wrote, or re-measure what a tool just reported.`;
  
@@ -3439,7 +3450,7 @@ index 648ba61..4313a56 100644
  	];
  	if (models) {
  		lines.push(`- \`models\`: classifiers and image generation. Read ${CODEMODE_DOCS_PATH} first.`);
-@@ -161,6 +206,13 @@ export function getCodemodeCallableTools(tools: readonly AgentTool<any>[]): Agen
+@@ -161,6 +207,13 @@ export function getCodemodeCallableTools(tools: readonly AgentTool<any>[]): Agen
  }
  
  export interface CodemodeDescriptionOptions {
@@ -3453,7 +3464,7 @@ index 648ba61..4313a56 100644
  	/** Declare the `models` namespace; only for tools created with model access. */
  	models?: boolean;
  	/** Namespace of each tool, by tool name. Tools of one namespace are listed under one heading. */
-@@ -183,6 +235,14 @@ function renderToolSection(declaration: Omit<CodemodeTool, "execute">): string {
+@@ -183,6 +236,14 @@ function renderToolSection(declaration: Omit<CodemodeTool, "execute">): string {
  	return `${heading}\n${renderToolSample(declaration).trim()}`;
  }
  
@@ -3468,7 +3479,7 @@ index 648ba61..4313a56 100644
  interface CatalogEntry {
  	name: string;
  	section: string;
-@@ -238,7 +298,7 @@ export function createCodemodeDescription(
+@@ -238,7 +299,7 @@ export function createCodemodeDescription(
  		const key = namespace ? `ns:${namespace.name}` : "";
  		const group = groups.get(key) ?? { namespace, entries: [] };
  		groups.set(key, group);
@@ -3477,7 +3488,7 @@ index 648ba61..4313a56 100644
  		group.entries.push({ name: declaration.name, section, cost: Math.ceil(section.length / CHARS_PER_TOKEN) });
  	}
  	const ordered = [...groups.values()].sort((a, b) =>
-@@ -249,6 +309,17 @@ export function createCodemodeDescription(
+@@ -249,6 +310,17 @@ export function createCodemodeDescription(
  	const sections = [DESCRIPTION_INTRO, describeGlobals(options.models === true)];
  	if (declarations.length === 0) return sections.join("\n\n");
  
@@ -3495,7 +3506,7 @@ index 648ba61..4313a56 100644
  	const toolSections = ["Nested tools:"];
  	for (const { namespace, entries } of ordered) {
  		const visible = entries.filter((entry) => shown.has(entry.name));
-@@ -285,13 +356,28 @@ function describeFields(schema: unknown, depth: number): string | undefined {
+@@ -285,13 +357,28 @@ function describeFields(schema: unknown, depth: number): string | undefined {
  			constValue !== undefined
  				? JSON.stringify(constValue)
  				: depth > 0
@@ -3525,7 +3536,7 @@ index 648ba61..4313a56 100644
  /**
   * What a script call resolves to, in one line: `a string`, the field names of an object (see
   * {@link describeFields}), the field names of each object in a union, the rendered type when it
-@@ -340,7 +426,10 @@ function describeScriptCall(tool: AgentTool<any>): string {
+@@ -340,7 +427,10 @@ function describeScriptCall(tool: AgentTool<any>): string {
   * Listing by exposure, not by the active set, keeps the codemode description unchanged when
   * `tool_search` loads a tool, so loads do not redeclare codemode.
   */
@@ -3537,7 +3548,7 @@ index 648ba61..4313a56 100644
  	const mode = options.getMode?.() ?? SETTINGS_DEFAULTS.codemode.mode;
  	const isDirect = (tool: AgentTool) => loadout.getExposure(tool.name) === "direct";
  	const callable = getCodemodeCallableTools(loadout.callable);
-@@ -351,7 +440,14 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+@@ -351,7 +441,14 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
  			if (callableNames.has(tool.name)) descriptions[tool.name] = describeScriptCall(tool);
  		}
  	}
@@ -3553,7 +3564,7 @@ index 648ba61..4313a56 100644
  	const namespaces = new Map(
  		listed.flatMap((tool) => {
  			const namespace = loadout.getNamespace(tool.name);
-@@ -360,6 +456,7 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+@@ -360,6 +457,7 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
  	);
  	const guidelines = new Map(listed.map((tool) => [tool.name, loadout.getPromptGuidelines(tool.name)] as const));
  	descriptions[CODEMODE_TOOL_NAME] = createCodemodeDescription(listed, {
@@ -3561,7 +3572,7 @@ index 648ba61..4313a56 100644
  		models: options.models === true,
  		namespaces,
  		guidelines,
-@@ -369,13 +466,21 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+@@ -369,13 +467,21 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
  		inlineBudget: options.getInlineBudget?.() ?? DEFAULT_CODEMODE_INLINE_BUDGET,
  	});
  	const declaredNames = new Set(loadout.declared.map((tool) => tool.name));
@@ -3590,7 +3601,7 @@ index 648ba61..4313a56 100644
  }
  
  /** Script globals that list or look up tools and namespaces, which the script may then call by any name. */
-@@ -391,6 +496,33 @@ function getScriptReach(code: unknown): "all" | readonly string[] {
+@@ -391,6 +497,33 @@ function getScriptReach(code: unknown): "all" | readonly string[] {
  	return DISCOVERY_GLOBALS.test(code) ? "all" : (code.match(/\w+/g) ?? []);
  }
  
@@ -3624,7 +3635,7 @@ index 648ba61..4313a56 100644
  export function createCodemodeToolDefinition(
  	options: CodemodeToolOptions = {},
  ): ToolDefinition<typeof codemodeSchema, CodemodeToolDetails | undefined> {
-@@ -404,13 +536,63 @@ export function createCodemodeToolDefinition(
+@@ -404,13 +537,63 @@ export function createCodemodeToolDefinition(
  		parameters: codemodeSchema,
  		// Scripts must not start other scripts.
  		exposure: "model-only",
