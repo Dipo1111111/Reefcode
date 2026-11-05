@@ -490,6 +490,16 @@ export class InteractiveMode {
 	 * and how many background jobs are running. Recomputed cheaply and only re-rendered on change.
 	 */
 	private refreshReefFacts(): void {
+		// Off by default: a stock-looking footer is the baseline, and these numbers are one setting
+		// away (`footer.harnessFacts`). `/context` and `/doctor` carry the same information in full.
+		if (this.settingsManager.getSettings().footer?.harnessFacts !== true) {
+			if (this.lastReefFacts !== "hidden") {
+				this.lastReefFacts = "hidden";
+				this.footer.setReefFacts(undefined);
+				this.ui.requestRender();
+			}
+			return;
+		}
 		const countRunningJobs = () => listJobs().filter((job) => job.status === "running").length;
 		const facts = this.session.getHarnessFacts();
 		const tier = this.settingsManager.getSettings().safety?.tier ?? "medium";

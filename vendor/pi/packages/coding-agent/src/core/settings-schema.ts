@@ -155,6 +155,16 @@ const CodemodeModeSchema = codemodeMode();
  * The one escape hatch (ADR-014). There is no per-model tuning: if the script engine ever makes a
  * model worse, turning it off is the supported answer, and it is global rather than per model.
  */
+const FooterSettingsSchema = Type.Object({
+	harnessFacts: Type.Optional(
+		Type.Boolean({
+			description:
+				"Show REEF's own numbers in the footer (declared tools, prompt cost, safety tier, running jobs). Off by default so the footer matches a stock layout.",
+			default: SETTINGS_DEFAULTS.footer.harnessFacts,
+		}),
+	),
+});
+
 const ScriptSettingsSchema = Type.Object({
 	enabled: Type.Optional(
 		Type.Boolean({
@@ -428,6 +438,7 @@ export const SettingsSchema = Type.Object(
 		warnings: Type.Optional(WarningSettingsSchema),
 		codemode: Type.Optional(CodemodeSettingsSchema),
 		script: Type.Optional(ScriptSettingsSchema),
+		footer: Type.Optional(FooterSettingsSchema),
 		safety: Type.Optional(SafetySettingsSchema),
 		sessionDir: Type.Optional(
 			Type.String({
@@ -512,6 +523,7 @@ export interface WarningSettings extends Static<typeof WarningSettingsSchema> {}
 export type CodemodeMode = Static<typeof CodemodeModeSchema>;
 export interface CodemodeSettings extends Static<typeof CodemodeSettingsSchema> {}
 export interface ScriptSettings extends Static<typeof ScriptSettingsSchema> {}
+export interface FooterSettings extends Static<typeof FooterSettingsSchema> {}
 export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust"]>;
 export type QuietStartup = NonNullable<SettingsInput["quietStartup"]>;
 export type TransportSetting = NonNullable<SettingsInput["transport"]>;

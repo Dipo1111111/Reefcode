@@ -522,7 +522,9 @@ export class AgentSession {
 		const schemaTokens = Math.ceil(JSON.stringify(tools).length / 3.6);
 		const budget = this._lastBudget;
 		if (!budget) {
-			return { declaredTools: tools.length, promptTokens: 0, requestCount: 0, schemaTokens };
+			// Before the first request: the prompt we would send, estimated from its own text.
+			const estimated = Math.ceil(this.systemPrompt.length / 3.6) + schemaTokens;
+			return { declaredTools: tools.length, promptTokens: estimated, requestCount: 0, schemaTokens };
 		}
 		return {
 			declaredTools: tools.length,

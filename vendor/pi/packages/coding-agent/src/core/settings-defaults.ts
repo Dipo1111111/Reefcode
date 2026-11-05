@@ -61,6 +61,9 @@ export const SETTINGS_DEFAULTS = {
 	script: {
 		enabled: true,
 	},
+	footer: {
+		harnessFacts: false,
+	},
 	safety: {
 		tier: "medium",
 		skipApprovals: false,
