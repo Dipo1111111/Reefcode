@@ -688,9 +688,11 @@ function createDiscoveryGlobals(
 				const [query, searchOptions] = args as [unknown, { limit?: unknown; namespace?: unknown } | undefined];
 				// A bare `searchTools()` means "what is there?". That is a reasonable question, and
 				// failing it costs the model a whole turn plus an error block in the transcript, so it
-				// answers with every tool instead of throwing.
+				// answers with every tool instead of throwing. Names only: the declaration already
+				// carries the signatures, and echoing them back here was 300 tokens of a turn that
+				// told the model nothing it had not been given.
 				if (query === undefined || query === null) {
-					return tools.map((tool) => entry(tool.name));
+					return tools.map((tool) => toCodemodeIdentifier(tool.name));
 				}
 				if (typeof query !== "string") throw new Error("searchTools() expects a query string");
 				const limit = searchOptions?.limit ?? DEFAULT_TOOL_SEARCH_LIMIT;

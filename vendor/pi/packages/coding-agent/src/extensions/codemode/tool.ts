@@ -158,7 +158,9 @@ const DESCRIPTION_INTRO = `Run one script that calls several tools. The input is
 - \`await tools.<tool>({ ...args })\` calls a tool. It resolves to the tool's output (a string, or an object when the declaration says so) and rejects with an Error when the call fails or is denied.
 - A script earns its turn by doing several calls. Batch independent ones with \`Promise.allSettled\`; loop when the data decides the next call. **A script with one call costs more than calling the tool once** — measured at +40% tokens on small tasks — so do it directly instead.
 - First line, optional: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\` (\`// @script:\` is an alias). \`startInBackground\` continues the script after the tool returns.
-- Long input text (a file body, a patch, a heredoc) goes in an input block instead of inside the code: \`// @input: patch <<'EOF'\` then the text, then a line with only \`EOF\`. Read it as \`inputs.patch\`. Blocks must be closed and are removed before the script runs.`;
+- Long input text (a file body, a patch, a heredoc) goes in an input block instead of inside the code: \`// @input: patch <<'EOF'\` then the text, then a line with only \`EOF\`. Read it as \`inputs.patch\`. Blocks must be closed and are removed before the script runs.
+- Every tool you have is listed below with its arguments. Do not open with a discovery call; the first call should be real work.
+- Create files with \`tools.write\`, change them with \`tools.edit\` — not shell redirection or \`sed -i\`.`;
 
 /** One line per global. The details live in {@link CODEMODE_DOCS_PATH}. */
 function describeGlobals(models: boolean): string {
@@ -167,7 +169,7 @@ function describeGlobals(models: boolean): string {
 		"- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. With several text items, each starts with a `==> text N/M <==` line, and `console` lines follow the other output in one `<console_output>` block. `image()` also saves the image to a temp file and the result names its path.",
 		"- `inputs.<name>` holds each `// @input:` block as a string; the object is frozen and never contains anything else.",
 		"- `store(key, value)` and `load(key)` keep JSON values across script calls.",
-		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools. The tools listed below are already available to you; do not spend a call listing them.",
+		"- `ALL_TOOLS`, `searchTools(query)`, `describeTool(name)`, `describeNamespace(name)`: only for tools that are **not** listed below, such as MCP servers that connect later.",
 	];
 	if (models) {
 		lines.push(`- \`models\`: classifiers and image generation. Read ${CODEMODE_DOCS_PATH} first.`);

@@ -53,7 +53,7 @@ describe("codemode description", () => {
 		expect(compact).toBeLessThan(full);
 		// Real tools carry longer descriptions than these fixtures; the live measurement after this
 		// change is what confirms the size, not this assertion.
-		expect(compact).toBeLessThan(620);
+		expect(compact).toBeLessThan(700);
 	});
 
 	it("compact keeps the batching rule, because that is what makes a script worth a turn", () => {

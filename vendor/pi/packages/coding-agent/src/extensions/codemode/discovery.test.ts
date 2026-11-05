@@ -13,7 +13,7 @@ describe("discovery guidance", () => {
 			[{ name: "read", description: "Read a file.", parameters: { type: "object", properties: {} } } as never],
 			{ compact: true },
 		);
-		expect(text).toContain("already available");
-		expect(text).toContain("do not spend a call listing them");
+		expect(text).toContain("listed below with its arguments");
+		expect(text).toContain("Do not open with a discovery call");
 	});
 });
