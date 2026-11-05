@@ -32,6 +32,7 @@ import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { runExecCommand } from "./cli/exec-command.ts";
 import { runSearchCommand } from "./cli/search-command.ts";
+import { runDoctorCommand } from "./cli/doctor-command.ts";
 import { runPermissionsCommand } from "./cli/permissions-command.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
@@ -586,6 +587,14 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (await runAuthCommand(args)) {
+		return;
+	}
+
+	// A bare word at a shell is a message, so `reef doctor` must be claimed here or it becomes a
+	// paid prompt whose answer the model guessed at.
+	const doctor = await runDoctorCommand(args);
+	if (doctor.handled) {
+		process.exitCode = doctor.exitCode ?? 0;
 		return;
 	}
 

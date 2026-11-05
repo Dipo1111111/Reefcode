@@ -291,6 +291,7 @@ ${chalk.bold("Commands:")}
   ${APP_NAME} remove <source> [-l]      Remove extension source from settings
   ${APP_NAME} uninstall <source> [-l]   Alias for remove
   ${APP_NAME} update [source|self]      Update ${APP_NAME}, extensions, or model catalogs
+  ${APP_NAME} doctor                    Check node, bundle, script engine, config, model auth, policy
   ${APP_NAME} list                      List installed extensions from settings
   ${APP_NAME} config [-l]               Open TUI to enable/disable package resources (Tab switches scope)
   ${APP_NAME} auth <command>            Print credentials or check provider readiness
