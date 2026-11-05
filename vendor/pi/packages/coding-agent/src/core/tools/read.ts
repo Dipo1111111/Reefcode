@@ -10,6 +10,17 @@ import { readRenderers } from "./renderers/read.ts";
 import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
+/** Reads up to this many lines are shown with line numbers. Beyond it, padding costs more than it saves. */
+const NUMBERED_READ_LINES = 500;
+
+/** Prefix each line with its number, right-aligned, so the gutter stays stable across windows. */
+function numberLines(content: string, startLineDisplay: number): string {
+	const lines = content.split("\n");
+	const lastNumber = startLineDisplay + lines.length - 1;
+	const width = String(lastNumber).length;
+	return lines.map((line, index) => `${String(startLineDisplay + index).padStart(width)}| ${line}`).join("\n");
+}
+
 const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
@@ -171,6 +182,13 @@ export function createReadToolDefinition(
 									userLimitedLines = endLine - startLine;
 								} else {
 									selectedContent = allLines.slice(startLine).join("\n");
+								}
+								// Number the lines we show, so a citation in the reply is a line the edit tool
+								// can use without a second lookup. A whole-file dump skips the numbers: past a
+								// few hundred lines the padding costs more than the round trip it saves.
+								const shownLines = selectedContent === "" ? 0 : selectedContent.split("\n").length;
+								if (shownLines > 0 && shownLines <= NUMBERED_READ_LINES) {
+									selectedContent = numberLines(selectedContent, startLineDisplay);
 								}
 								// Apply truncation, respecting both line and byte limits.
 								const truncation = truncateHead(selectedContent);

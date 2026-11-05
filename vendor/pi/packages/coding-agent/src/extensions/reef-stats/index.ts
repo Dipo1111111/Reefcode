@@ -102,6 +102,39 @@ export function createReefStatsExtension(): ExtensionFactory {
 			return undefined;
 		});
 
+		pi.registerCommand("trace", {
+			description: "The last requests: tokens per section, cache verdict, violations",
+			handler: async (args: string, ctx) => {
+				if (typeof ctx.getRequestAudits !== "function") {
+					ctx.ui?.notify?.("Request auditing is not available in this context.");
+					return;
+				}
+				const limit = Number.parseInt(args.trim(), 10) || 5;
+				const audits = ctx.getRequestAudits().slice(-limit);
+				if (audits.length === 0) {
+					ctx.ui?.notify?.("No requests yet.");
+					return;
+				}
+				const lines: string[] = [];
+				for (const audit of audits) {
+					const head = `#${audit.request}  ${audit.tokens} tok  cache ${audit.cacheablePrefixTokens} tok  ${
+						audit.appendOnly ? "append-only" : `BREAK (${audit.breakReason})`
+					}`;
+					lines.push(head);
+					const sections = Object.entries(audit.sectionTokens).sort((a, b) => b[1] - a[1]);
+					lines.push(`   ${sections.map(([name, tokens]) => `${name} ${tokens}`).join(" · ")}`);
+					lines.push(`   tools: ${audit.tools.join(", ")}`);
+					for (const truncated of audit.truncated) {
+						lines.push(`   truncated ${truncated.name}: dropped ${truncated.dropped} bytes`);
+					}
+					for (const violation of audit.violations) lines.push(`   ! ${violation}`);
+				}
+				const budget = ctx.getSectionBudget();
+				if (budget) lines.push("", `total prompt: ${budget.tokens} tokens`);
+				ctx.ui?.notify?.(lines.join("\n"));
+			},
+		});
+
 		pi.registerCommand("cost", {
 			description: "Tokens, cache reuse, and spend for this session",
 			handler: async (_args: string, ctx) => {

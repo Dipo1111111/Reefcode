@@ -194,9 +194,11 @@ export function parseScriptInputs(code: string): { code: string; inputs: ScriptI
 
 /** `parseScriptInputs` after `parseCodemodeSource`: options line first, then input blocks. */
 export function parseScriptSource(source: string, options?: CodemodeSourceOptions): ParsedScriptSource {
-	const normalized = source.trimStart().startsWith(SCRIPT_OPTIONS_PREFIX)
-		? `// @options:${source.trimStart().slice(SCRIPT_OPTIONS_PREFIX.length)}`
-		: source;
+	// A caller that omitted `script` gets a parse of the empty string, not a crash in the parser.
+	const text = typeof source === "string" ? source : "";
+	const normalized = text.trimStart().startsWith(SCRIPT_OPTIONS_PREFIX)
+		? `// @options:${text.trimStart().slice(SCRIPT_OPTIONS_PREFIX.length)}`
+		: text;
 	const parsed = parseCodemodeSource(normalized);
 	const { code, inputs } = parseScriptInputs(parsed.code);
 	return { code, options: parsed.options, inputs };

@@ -7,6 +7,7 @@
  * to the tier default, and in a headless run an `ask` is a `block` — never a silent yes.
  */
 
+import { type PolicyRule, resolveCommand } from "./policy.ts";
 import {
 	BUILTIN_RULES,
 	type BuiltinRule,
@@ -159,15 +160,52 @@ export function decide(call: Call, context: Context, rules: readonly BuiltinRule
 		return { decision: "block", reason: rule?.reason ?? "That path holds credentials.", ruleId: "builtin/secret-paths", scopes: ["secret"] };
 	}
 
-	if (verdict.decision === "ask" && (context.headless || context.skipApprovals)) {
-		return {
-			decision: "block",
-			reason: context.headless
-				? `${verdict.reason} No human is here to approve it, so it was denied.`
-				: `${verdict.reason} Approvals were skipped, so it was denied.`,
-			ruleId: verdict.ruleId,
-			scopes: verdict.scopes,
-		};
+	return enforce(context, verdict);
+}
+
+/**
+ * Turn an `ask` that nobody can answer into a deny. `skipApprovals` denies rather than allows: a
+ * flag that means "do not ask me" must never mean "do whatever you like".
+ */
+export function enforce(context: Context, verdict: Verdict): Verdict {
+	if (verdict.decision !== "ask") return verdict;
+	if (!context.headless && !context.skipApprovals) return verdict;
+	return {
+		decision: "block",
+		reason: context.headless
+			? `${verdict.reason} No human is here to approve it, so it was denied.`
+			: `${verdict.reason} Approvals were skipped, so it was denied.`,
+		ruleId: verdict.ruleId,
+		scopes: verdict.scopes,
+	};
+}
+
+/**
+ * Decide with the project's permissions files in front of the builtin floor.
+ *
+ * A policy rule wins over the tier default because it is more specific; the builtin floor is still
+ * applied to the result, because a `block` there is not overridable.
+ */
+export function decideWithPolicy(
+	call: Call,
+	context: Context,
+	policy: readonly PolicyRule[],
+	builtin: readonly BuiltinRule[] = BUILTIN_RULES,
+): Verdict & { source?: string } {
+	const command = typeof call.input.command === "string" ? call.input.command : undefined;
+	if (command) {
+		const resolution = resolveCommand(command, policy);
+		if (resolution?.rule) {
+			const verdict: Verdict = {
+				decision: resolution.decision,
+				reason: resolution.rule.reason,
+				ruleId: resolution.rule.id,
+				scopes: [resolution.rule.id.startsWith("builtin/") ? resolution.rule.id.slice("builtin/".length) : resolution.rule.id],
+			};
+			const floored = decide(call, { ...context, tier: context.tier === "none" ? "high" : context.tier }, builtin);
+			const final = floored.decision === "block" ? floored : enforce(context, verdict);
+			return { ...final, source: resolution.rule.source };
+		}
 	}
-	return verdict;
+	return decide(call, context, builtin);
 }

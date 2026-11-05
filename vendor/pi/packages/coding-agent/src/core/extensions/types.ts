@@ -60,6 +60,7 @@ import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.ts";
+import type { BudgetResult, RequestAudit } from "../request-audit.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
@@ -421,6 +422,12 @@ export interface ExtensionToolContext extends ExtensionContext {
 export interface ExtensionCommandContext extends ExtensionContext {
 	/** Get the current base system-prompt construction options. */
 	getSystemPromptOptions(): BuildSystemPromptOptions;
+
+	/** Request audits for this session, oldest first. */
+	getRequestAudits(): readonly RequestAudit[];
+
+	/** The most recent section budget, including anything truncated to fit. */
+	getSectionBudget(): BudgetResult | undefined;
 
 	/** Wait for the agent to finish streaming */
 	waitForIdle(): Promise<void>;
@@ -2269,6 +2276,10 @@ export interface ExtensionContextActions {
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;
+	/** Request audits for this session, oldest first: tokens per section and the cache verdict. */
+	getRequestAudits?: () => readonly RequestAudit[];
+	/** The most recent section budget, including anything truncated to fit. */
+	getSectionBudget?: () => BudgetResult | undefined;
 	/** Backs `ExtensionToolContext.executeTool()`. Without it, nested calls fail. */
 	executeTool?: (
 		callerId: string,

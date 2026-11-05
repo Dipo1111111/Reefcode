@@ -23,6 +23,8 @@ export interface BuiltinRule {
 	reason: string;
 	match: RuleMatch;
 	tests: { match: string[]; noMatch: string[] };
+	/** `false` still shadows a lower-precedence rule with the same id. */
+	enabled?: boolean;
 }
 
 const SECRET_PATHS = ["\\.env(\\..*)?$", "id_rsa", "id_ed25519", "\\.ssh/", "\\.netrc$", "\\.pem$", "credentials\\.json$"];
@@ -32,7 +34,7 @@ export const BUILTIN_RULES: BuiltinRule[] = [
 		id: "builtin/rm-root",
 		decision: "block",
 		reason: "Refusing to delete a root or home path. Name the directory you mean.",
-		match: { regex: "\\brm\\s+(-[a-zA-Z]*[rf][a-zA-Z]*\\s+)+(/|/\\*|~/?|\\*|\\.|/[A-Za-z0-9_.-]+)(\\s|$)" },
+		match: { regex: "\\brm\\s+(-[a-zA-Z]*[rf][a-zA-Z]*\\s+)+(/|/\\*|~/?|\\*|\\.|/[A-Za-z0-9_.-]+)([\\s'\"]|$)" },
 		tests: {
 			match: ["rm -rf /", "rm -fr ~", "sudo rm -rf /usr", "rm -rf *"],
 			noMatch: ["rm -rf node_modules", "rm package.json", "ls -rf /"],

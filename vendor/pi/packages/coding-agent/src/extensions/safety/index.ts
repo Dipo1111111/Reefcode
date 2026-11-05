@@ -10,8 +10,9 @@
 
 import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types.ts";
 import { SETTINGS_DEFAULTS } from "../../core/settings-defaults.ts";
+import { type LoadedPolicy, loadPolicy } from "./policy.ts";
 import { checkRules } from "./rules.ts";
-import { type Context, decide, isTier, type Tier, TIERS } from "./tiers.ts";
+import { type Context, decideWithPolicy, isTier, type Tier } from "./tiers.ts";
 
 export interface SafetyOptions {
 	tier?: Tier;
@@ -35,12 +36,38 @@ function readSkipApprovals(pi: ExtensionAPI): boolean {
 export function createSafetyExtension(options: SafetyOptions = {}): ExtensionFactory {
 	return (pi) => {
 		// A rule that fails its own examples is inert. Recording it once beats trusting it.
-		const problems = checkRules();
+		let problems = checkRules();
+		let policy: LoadedPolicy | undefined;
+		const load = (cwd: string) => {
+			policy = loadPolicy({ cwd });
+			problems = [...checkRules(), ...policy.problems];
+			return policy;
+		};
+		const current = (cwd: string): LoadedPolicy => policy ?? load(cwd);
+
+		pi.registerCommand("permissions", {
+			description: "Show the rules that apply here, or reload them",
+			handler: async (args: string, ctx) => {
+				if (args.trim() === "reload") load(ctx.cwd);
+				const loaded = current(ctx.cwd);
+				const lines = [`Rules: ${loaded.rules.length} (${loaded.sources.length} file${loaded.sources.length === 1 ? "" : "s"})`];
+				for (const source of loaded.sources) lines.push(`  ${source}`);
+				const bySource = new Map<string, number>();
+				for (const rule of loaded.rules) bySource.set(rule.source, (bySource.get(rule.source) ?? 0) + 1);
+				for (const [source, count] of bySource) lines.push(`  ${source}: ${count}`);
+				if (loaded.problems.length > 0) {
+					lines.push("", "Problems:");
+					for (const problem of loaded.problems) lines.push(`  ! ${problem}`);
+				}
+				ctx.ui?.notify?.(lines.join("\n"));
+			},
+		});
 
 		pi.registerCommand("safety", {
 			description: "Show the current autonomy tier and what it allows",
 			handler: async (_args: string, ctx) => {
 				const tier = options.tier ?? readTier(pi);
+				const loaded = current(ctx.cwd);
 				const lines = [
 					`Tier: ${tier}`,
 					"",
@@ -54,10 +81,14 @@ export function createSafetyExtension(options: SafetyOptions = {}): ExtensionFac
 					`Approvals skipped: ${readSkipApprovals(pi) ? "yes" : "no"}`,
 					`Headless: ${ctx.hasUI ? "no" : "yes (an ask becomes a deny)"}`,
 				];
+				lines.push(`Policy files: ${loaded.sources.length === 0 ? "none" : loaded.sources.join(", ")}`);
 				if (problems.length > 0) lines.push("", ...problems.map((problem) => `rule problem: ${problem}`));
 				ctx.ui?.notify?.(lines.join("\n"));
 			},
 		});
+
+		/** Commands the user approved in this session, so the same ask is not shown twice. */
+		const approved = new Set<string>();
 
 		pi.on("tool_call", async (event, ctx) => {
 			const tier = options.tier ?? readTier(pi);
@@ -72,8 +103,24 @@ export function createSafetyExtension(options: SafetyOptions = {}): ExtensionFac
 				input: (event.input ?? {}) as Record<string, unknown>,
 				nested: event.parentToolCallId !== undefined,
 			};
-			const verdict = decide(call, context);
+			const verdict = decideWithPolicy(call, context, current(ctx.cwd).rules);
 			if (verdict.decision === "allow") return;
+			if (verdict.decision === "ask" && !context.headless && ctx.ui) {
+				// Interactive: ask, once per distinct command per session. A batch of identical asks is
+				// noise, not diligence.
+				const key = `${call.tool}\u0000${summarize(call)}`;
+				if (!approved.has(key)) {
+					const ok = await ctx.ui.confirm(
+						`Allow this ${call.tool} call?`,
+						`${summarize(call)}\n\n${verdict.reason}`,
+					);
+					if (!ok) {
+						return { block: true, reason: `policy_denied: ${verdict.reason}` };
+					}
+					approved.add(key);
+				}
+				return;
+			}
 			const label = verdict.ruleId ? `policy_block (${verdict.ruleId})` : "policy_block";
 			return {
 				block: true,
@@ -81,6 +128,15 @@ export function createSafetyExtension(options: SafetyOptions = {}): ExtensionFac
 			};
 		});
 	};
+}
+
+/** A short, quotable form of the call for the approval dialog and the block message. */
+function summarize(call: { tool: string; input: Record<string, unknown> }): string {
+	if (typeof call.input.command === "string") return call.input.command;
+	const path = call.input.path ?? call.input.file_path;
+	if (typeof path === "string") return path;
+	const entries = Object.entries(call.input).slice(0, 3);
+	return entries.map(([key, value]) => `${key}=${String(value).slice(0, 60)}`).join(" ");
 }
 
 export default createSafetyExtension();

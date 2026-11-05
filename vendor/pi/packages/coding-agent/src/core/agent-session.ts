@@ -80,6 +80,13 @@ import {
 	shouldCompact,
 } from "./compaction/index.ts";
 import { DEFAULT_THINKING_LEVEL, THINKING_LEVEL_OPTIONS } from "./defaults.ts";
+import {
+	applySectionBudgets,
+	type BudgetResult,
+	formatAudit,
+	type RequestAudit,
+	RequestAuditor,
+} from "./request-audit.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
@@ -496,6 +503,26 @@ export class AgentSession {
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 
 	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
+	/** Instruments the request compiler: section budgets, and the append-only contract. */
+	private readonly _requestAuditor = new RequestAuditor();
+	private _lastBudget: BudgetResult | undefined;
+	private _lastAudit: RequestAudit | undefined;
+
+	/** Snapshot the request that is about to be sent, and say so when it breaks the cache contract. */
+	private _recordRequestAudit(messages: readonly AgentMessage[]): void {
+		const audit = this._requestAuditor.observe({
+			sections: this._lastBudget?.sections ?? {},
+			tools: this.agent.state.tools.map((tool) => tool.name),
+			messages,
+			truncated: this._lastBudget?.truncated,
+			extraTokens: { schemas: Math.round(JSON.stringify(this.agent.state.tools).length / 3.6) },
+		});
+		this._lastAudit = audit;
+		if (process.env.REEF_TRACE === "1") process.stderr.write(`[reef] ${formatAudit(audit)}\n`);
+		for (const violation of audit.violations) {
+			process.stderr.write(`[reef] cache contract: ${violation}\n`);
+		}
+	}
 	/** Prompt options after before_agent_start mutations for the active run. */
 	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
 
@@ -935,6 +962,9 @@ export class AgentSession {
 			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
 			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
 			this._runSystemPromptOptions = options;
+			// Measure the request we are about to send: tokens per section, and whether it extends
+			// the last one. A violation is a fact about our own code, not the model's.
+			this._recordRequestAudit(nextContext.messages);
 
 			return {
 				...previousSnapshot,
@@ -1801,10 +1831,9 @@ export class AgentSession {
 		options.selectedTools = this._applyToolLoadout(options.selectedTools).map((tool) => tool.name);
 		// The tool list and rules must match the declarations the request carries.
 		options.hiddenTools = [...this._hiddenDeclarations];
-		const sections = diffSystemPromptSections(
-			getCurrentSystemMessage(messages)?.sections ?? {},
-			buildSystemPromptSections(options),
-		);
+		const budget = applySectionBudgets(buildSystemPromptSections(options));
+		this._lastBudget = budget;
+		const sections = diffSystemPromptSections(getCurrentSystemMessage(messages)?.sections ?? {}, budget.sections);
 		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
 	}
 
@@ -2012,6 +2041,8 @@ export class AgentSession {
 		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
 		this._runSystemPromptOptions = result.systemPromptOptions;
 		if (updateMessage) messages.unshift(updateMessage);
+		// The first request of a run has no `prepareNextTurnWithContext` call in front of it.
+		this._recordRequestAudit(messages);
 		return messages;
 	}
 
@@ -3596,6 +3627,8 @@ export class AgentSession {
 				},
 				getSystemPrompt: () => this.systemPrompt,
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
+				getRequestAudits: () => this._requestAuditor.history,
+				getSectionBudget: () => this._lastBudget,
 				executeTool: (callerId, name, args, options) => this._executeNestedToolCall(callerId, name, args, options),
 				getCallableTools: () => this._getCallableTools(),
 			},

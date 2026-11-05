@@ -16,6 +16,7 @@ import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { BASH_UPDATE_THROTTLE_MS, createShellRenderers } from "./renderers/bash.ts";
 import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { publishArtifact } from "./artifacts.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
 
 const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -339,16 +340,21 @@ export function createShellToolDefinition(
 				let text = snapshot.content || emptyText;
 				let details: BashToolDetails | undefined;
 				if (truncation.truncated) {
-					details = { truncation, fullOutputPath: snapshot.fullOutputPath };
+					// Publish the full output inside the project so the pointer survives the session.
+					const durable = snapshot.fullOutputPath
+						? publishArtifact(spawnContext.cwd, "bash", snapshot.fullOutputPath, `${truncation.totalLines}:${truncation.totalBytes}`)
+						: undefined;
+					const pointer = durable ?? snapshot.fullOutputPath;
+					details = { truncation, fullOutputPath: pointer };
 					const startLine = truncation.totalLines - truncation.outputLines + 1;
 					const endLine = truncation.totalLines;
 					if (truncation.lastLinePartial) {
 						const lastLineSize = formatSize(output.getLastLineBytes());
-						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${pointer}]`;
 					} else if (truncation.truncatedBy === "lines") {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${pointer}]`;
 					} else {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${pointer}]`;
 					}
 				}
 				return { text, details };
@@ -387,11 +393,17 @@ export function createShellToolDefinition(
 				}
 				const wallTimeSeconds = Math.round((performance.now() - startedAt) / 100) / 10;
 				const fullOutput = await output.readFullOutput(STRUCTURED_OUTPUT_MAX_BYTES);
+				// The structured (script-facing) result points at the durable copy when there is one:
+				// a temp file is gone by the next session, and a script may hand the path to the model.
+				const durableFullOutput =
+					fullOutput.truncated && snapshot.fullOutputPath
+						? publishArtifact(spawnContext.cwd, "bash", snapshot.fullOutputPath, `${snapshot.truncation.totalLines}:${snapshot.truncation.totalBytes}`)
+						: undefined;
 				const structuredContent: BashToolOutput = {
 					output: fullOutput.content,
 					truncated: fullOutput.truncated,
 					...(fullOutput.truncated && snapshot.fullOutputPath
-						? { full_output_path: snapshot.fullOutputPath }
+						? { full_output_path: durableFullOutput ?? snapshot.fullOutputPath }
 						: {}),
 					exit_code: exitCode,
 					wall_time_seconds: wallTimeSeconds,
