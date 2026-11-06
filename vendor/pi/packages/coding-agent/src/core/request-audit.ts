@@ -190,12 +190,41 @@ export interface RequestAudit {
 	at: number;
 }
 
+/**
+ * Provider adapters annotate the blocks they send with `cache_control` and its ttl, in place. Those
+ * keys are not part of what the model sees, so they must not count as the message changing: the
+ * audit reported "message 0 changed after it was sent" on a request that was byte-identical, and
+ * wrote the line over the input box.
+ */
+function stripSendMarkers(_key: string, value: unknown): unknown {
+	return _key === "cache_control" ? undefined : value;
+}
+
+/**
+ * The text a message contributes to the prompt, whatever shape it arrived in. A string and the
+ * single text block that replaces it on the wire are the same prompt, and the compiler rewrites one
+ * into the other in place: hashing the raw JSON reported a cache break on a request that was
+ * identical, and printed the warning over the input box.
+ */
+function contentText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return JSON.stringify(content ?? "", stripSendMarkers);
+	return content
+		.map((block) => {
+			if (typeof block === "string") return block;
+			if (block && typeof block === "object") {
+				const text = (block as { text?: unknown }).text;
+				if (typeof text === "string") return text;
+			}
+			return JSON.stringify(block, stripSendMarkers);
+		})
+		.join("\u0002");
+}
+
 function messageText(message: unknown): string {
 	const candidate = message as { role?: string; content?: unknown } | undefined;
 	const role = candidate?.role ?? "unknown";
-	const content = candidate?.content;
-	const text = typeof content === "string" ? content : JSON.stringify(content ?? "");
-	return `${role}\u0000${text}`;
+	return `${role}\u0000${contentText(candidate?.content)}`;
 }
 
 function messageKey(message: unknown): string {

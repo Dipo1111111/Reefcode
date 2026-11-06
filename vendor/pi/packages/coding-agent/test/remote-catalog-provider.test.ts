@@ -318,7 +318,7 @@ describe("personalized catalog provider", () => {
 		const personalize: PersonalizeCatalog = async () => {
 			throw new Error("user models request failed");
 		};
-		const provider = withPersonalizedCatalog(builtinProvider(), personalize);
+		const provider = withPersonalizedCatalog(builtinProvider(), personalize, "https://catalog.invalid");
 
 		await expect(refreshProvider(provider, store)).rejects.toThrow("user models request failed");
 		expect(provider.getModels().map((entry) => entry.id)).toEqual(["allowed"]);
@@ -330,7 +330,7 @@ describe("personalized catalog provider", () => {
 			throw new Error("not used offline");
 		};
 		const store = new InMemoryModelsStore();
-		const provider = withPersonalizedCatalog(builtinProvider(), personalize);
+		const provider = withPersonalizedCatalog(builtinProvider(), personalize, "https://catalog.invalid");
 
 		// pi versions before per-key lists stored the plain pi.dev catalog here, and saved an empty list
 		// after a missing pi.dev catalog or a failed first request. Only such an entry can be empty.

@@ -78,6 +78,19 @@ describe("the cache contract", () => {
 		expect(audit.violations[0]).toContain("message 0 changed");
 	});
 
+	it("ignores the cache_control markers a provider adds on the way out", () => {
+		// Regression: adapters annotate the last block in place, the hash changed, and the audit wrote
+		// "message 0 changed after it was sent" over the input box for a request that never changed.
+		const auditor = new RequestAuditor();
+		const messages = [
+			{ role: "user", content: [{ type: "text", text: "hi" }] as { type: string; text: string; cache_control?: unknown }[] },
+		];
+		auditor.observe({ sections: sections(), tools: ["script"], messages });
+		messages[0]!.content[0]!.cache_control = { type: "ephemeral" };
+		const audit = auditor.observe({ sections: sections(), tools: ["script"], messages });
+		expect(audit.appendOnly).toBe(true);
+	});
+
 	it("catches a section edit mid-session", () => {
 		const auditor = new RequestAuditor();
 		const messages = [{ role: "user", content: "hi" }];

@@ -115,7 +115,8 @@ import {
 	type UsageEntry,
 } from "../../core/session-manager.ts";
 import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.ts";
-import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
+import { BUILTIN_SLASH_COMMANDS, BUILTIN_COMMAND_NAMES } from "../../core/slash-commands.ts";
+import { expandSkillMentions as expandSkillMentionsInText, skillMentionFromFile } from "../../core/skill-mentions.ts";
 import { getSourcePackageKey, type SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import { withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
@@ -4953,31 +4954,16 @@ export class InteractiveMode {
 	 * Tags for skills that no longer exist are left as prose rather than silently dropped.
 	 */
 	private expandSkillMentions(text: string): string {
-		if (!text.includes("skill:")) return text;
-		const blocks: string[] = [];
-		let changed = false;
-		const prose = text
-			.replace(/(^|\s)skill:([A-Za-z0-9._-]+)/g, (match, lead: string, name: string) => {
-				const filePath = this.skillCommands.get(`skill:${name}`);
-				if (!filePath) return match;
-				try {
-					const content = fs.readFileSync(filePath, "utf8").trim();
-					// A skill is a procedure, and procedures are written one step at a time. Without
-					// this line the model replayed each step as its own turn: nine discovery calls on
-					// a restore that needed two. The steps do not change; the batching does.
-					const batching =
-						"Run this procedure in as few turns as possible. Every independent read belongs in the same `script` call: step 1, and every step that only opens more files, is one call, not one per step. Only a step whose next move depends on the result earns a turn of its own.";
-					blocks.push(`<skill name="${name}" location="${filePath}">\n${batching}\n\n${content}\n</skill>`);
-					changed = true;
-					return lead;
-				} catch {
-					return match;
-				}
-			})
-			.replace(/[ \t]{2,}/g, " ")
-			.trim();
-		if (!changed) return text;
-		return prose ? `${blocks.join("\n\n")}\n\n${prose}` : blocks.join("\n\n");
+		return expandSkillMentionsInText(text, (name) => {
+			const filePath = this.skillCommands.get(`skill:${name}`);
+			if (!filePath) return undefined;
+			try {
+				const body = fs.readFileSync(filePath, "utf8").trim();
+				return skillMentionFromFile(name, filePath, body);
+			} catch {
+				return undefined;
+			}
+		}, BUILTIN_COMMAND_NAMES);
 	}
 
 	private isExtensionCommand(text: string): boolean {

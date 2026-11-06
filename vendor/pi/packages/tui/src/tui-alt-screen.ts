@@ -16,6 +16,8 @@ import {
 	type LayoutFrame,
 	renderLayoutFrame,
 	type ScrollbarGeometry,
+	type LayoutBox,
+	type LayoutRect,
 } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import type { Terminal } from "./terminal.ts";
@@ -47,6 +49,7 @@ import {
 	type TuiStopOptions,
 	VIEWPORT_TUI,
 	type ViewportTUI,
+	type ComponentSelection,
 } from "./tui.ts";
 import {
 	extractAnsiCode,
@@ -1450,6 +1453,55 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return { start: Math.max(minColumn, start), end: Math.min(maxColumn, end) };
 	}
 
+	/**
+	 * The active selection in the focused component's own cells, but only when the whole selection
+	 * sits inside that component. A selection that starts in the transcript is not the input's to delete.
+	 */
+	protected override getActiveSelection(): ComponentSelection | undefined {
+		const focused = this.getFocusedComponent();
+		const selection = this.getSelectionBounds();
+		if (!focused || !selection || !this.currentLayout) return undefined;
+		const rect = this.getComponentRect(focused);
+		if (!rect) return undefined;
+		const inside = (point: SelectionPoint): boolean =>
+			point.row >= rect.y && point.row < rect.y + rect.height && point.col >= rect.x && point.col < rect.x + rect.width;
+		if (!inside(selection.start) || !inside(selection.end)) return undefined;
+		// Character selections include the cell under the end point; word and line selections already
+		// end on an exclusive boundary.
+		const endCol = selection.end.boundary ? selection.end.col : selection.end.col + 1;
+		return {
+			start: { row: selection.start.row - rect.y, col: selection.start.col - rect.x },
+			end: { row: selection.end.row - rect.y, col: endCol - rect.x },
+		};
+	}
+
+	/**
+	 * Where a component is on screen. Layout boxes only exist for components wrapped in a layout node,
+	 * so the editor usually sits inside a container box; descend from the deepest box that holds it,
+	 * stacking children the way `Container.render` does.
+	 */
+	private getComponentRect(target: Component): LayoutRect | undefined {
+		const layout = this.currentLayout;
+		if (!layout) return undefined;
+		if (this.layoutRoot) {
+			const anchor = findDeepestBoxHolding(layout.root, target);
+			const rect = anchor ? descendToComponent(anchor.component, target, anchor.rect) : undefined;
+			return rect;
+		}
+		// Without a layout root the visible document is this TUI's own children, stacked in order.
+		// Its box already carries the scroll offset, so the stack starts where the box starts.
+		const documentBox = findDeepestBoxHolding(layout.root, this.implicitDocument);
+		if (!documentBox) return undefined;
+		return descendThroughChildren(this.children, target, documentBox.rect);
+	}
+
+	protected override clearActiveSelection(): void {
+		this.selectionAnchor = undefined;
+		this.selectionFocus = undefined;
+		this.selectionGranularity = "character";
+		this.selectionInitialRange = undefined;
+	}
+
 	private getActiveSelectionText(): string | undefined {
 		const selection = this.getSelectionBounds();
 		if (!selection) return undefined;
@@ -1797,4 +1849,43 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.previousScreenHeight = height;
 		this.currentLayout = nextLayout;
 	}
+}
+
+/** True when `component` is `target` or renders it somewhere below itself. */
+function rendersTarget(component: Component, target: Component): boolean {
+	if (component === target) return true;
+	if (!(component instanceof Container)) return false;
+	return component.children.some((child) => rendersTarget(child, target));
+}
+
+/** The deepest layout box whose component renders `target`. */
+function findDeepestBoxHolding(box: LayoutBox, target: Component): LayoutBox | undefined {
+	if (!rendersTarget(box.component, target)) return undefined;
+	for (const child of box.children) {
+		const found = findDeepestBoxHolding(child, target);
+		if (found) return found;
+	}
+	return box;
+}
+
+/** Stack children vertically, as `Container.render` and `Container.handleMouse` do. */
+function descendThroughChildren(
+	children: readonly Component[],
+	target: Component,
+	rect: LayoutRect,
+): LayoutRect | undefined {
+	let y = rect.y;
+	for (const child of children) {
+		const height = child.render(rect.width).length;
+		const found = descendToComponent(child, target, { x: rect.x, y, width: rect.width, height });
+		if (found) return found;
+		y += height;
+	}
+	return undefined;
+}
+
+function descendToComponent(component: Component, target: Component, rect: LayoutRect): LayoutRect | undefined {
+	if (component === target) return rect;
+	if (!(component instanceof Container)) return undefined;
+	return descendThroughChildren(component.children, target, rect);
 }
