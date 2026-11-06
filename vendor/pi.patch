@@ -2728,10 +2728,10 @@ index 1ef7973..b505597 100644
  export type TransportSetting = NonNullable<SettingsInput["transport"]>;
 diff --git a/packages/coding-agent/src/core/skill-mentions.test.ts b/packages/coding-agent/src/core/skill-mentions.test.ts
 new file mode 100644
-index 0000000..f1b7bb9
+index 0000000..5404f5c
 --- /dev/null
 +++ b/packages/coding-agent/src/core/skill-mentions.test.ts
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,88 @@
 +import { describe, expect, it } from "vitest";
 +import { expandSkillMentions, renderSkillBlock, type SkillMention } from "./skill-mentions.ts";
 +
@@ -2801,6 +2801,19 @@ index 0000000..f1b7bb9
 +		const out = expandSkillMentions("/remember go", resolve, builtins);
 +		expect(out).toContain("Run this procedure in as few turns as possible");
 +		expect(out).toContain("References are relative to /skills/remember.");
++	});
++
++	it("expands exactly once, even when the skill body names itself", () => {
++		// The remember skill's instructions say `/remember save` and `/remember restore`. A second pass
++		// over expanded text inserted the skill again for each mention, nine times, breaking the block
++		// parser so the whole thing rendered as one user message.
++		const selfNaming: SkillMention = {
++			...remember,
++			body: "# Remember\n\nEvery session ends with `/remember save`.\nEvery session starts with `/remember restore`.",
++		};
++		const once = expandSkillMentions("/remember restore the ios folder", (n) => (n === "remember" ? selfNaming : undefined), builtins);
++		expect(once.match(/<skill name=/g)?.length).toBe(1);
++		expect(expandSkillMentions(once, (n) => (n === "remember" ? selfNaming : undefined), builtins)).toBe(once);
 +	});
 +
 +	it("renders one block from a skill without re-reading its file", () => {
@@ -8177,20 +8190,19 @@ index 0000000..90dc744
 +	return backgroundAnsi(RED_DEEP, theme.getColorMode());
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index 268a7fa..6f6331f 100644
+index 268a7fa..d81dd37 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-@@ -115,7 +115,8 @@ import {
+@@ -115,7 +115,7 @@ import {
  	type UsageEntry,
  } from "../../core/session-manager.ts";
  import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.ts";
 -import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 +import { BUILTIN_SLASH_COMMANDS, BUILTIN_COMMAND_NAMES } from "../../core/slash-commands.ts";
-+import { expandSkillMentions as expandSkillMentionsInText, skillMentionFromFile } from "../../core/skill-mentions.ts";
  import { getSourcePackageKey, type SourceInfo } from "../../core/source-info.ts";
  import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
  import { withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
-@@ -151,7 +152,8 @@ import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
+@@ -151,7 +151,8 @@ import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
  import { ExtensionEditorComponent } from "./components/extension-editor.ts";
  import { ExtensionInputComponent } from "./components/extension-input.ts";
  import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
@@ -8200,7 +8212,7 @@ index 268a7fa..6f6331f 100644
  import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
  import { LoginDialogComponent } from "./components/login-dialog.ts";
  import { createMarkdownTransform } from "./components/markdown-transform.ts";
-@@ -163,7 +165,7 @@ import {
+@@ -163,7 +164,7 @@ import {
  	formatAuthSelectorProviderType,
  	OAuthSelectorComponent,
  } from "./components/oauth-selector.ts";
@@ -8209,7 +8221,7 @@ index 268a7fa..6f6331f 100644
  import { createLoginMenuSelector } from "./components/radius-login-selector.ts";
  import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
  import { SessionSelectorComponent } from "./components/session-selector.ts";
-@@ -373,7 +375,7 @@ type LoginProviderCompletionOption = {
+@@ -373,7 +374,7 @@ type LoginProviderCompletionOption = {
  	subscription?: boolean;
  };
  
@@ -8218,7 +8230,7 @@ index 268a7fa..6f6331f 100644
  
  const AUTH_TYPE_ORDER = { oauth: 0, api_key: 1 } satisfies Record<AuthSelectorProvider["authType"], number>;
  
-@@ -481,6 +483,37 @@ export class InteractiveMode {
+@@ -481,6 +482,37 @@ export class InteractiveMode {
  	private activeSelectorToken?: object;
  	private activeSelectorDispose?: () => void;
  	private footer: FooterComponent;
@@ -8256,7 +8268,15 @@ index 268a7fa..6f6331f 100644
  	private footerContainer: Container;
  	private footerDataProvider: FooterDataProvider;
  	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
-@@ -560,6 +593,8 @@ export class InteractiveMode {
+@@ -532,7 +564,6 @@ export class InteractiveMode {
+ 	});
+ 
+ 	// Skill commands: command name -> skill file path
+-	private skillCommands = new Map<string, string>();
+ 
+ 	// Agent subscription unsubscribe function
+ 	private unsubscribe?: () => void;
+@@ -560,6 +591,8 @@ export class InteractiveMode {
  	private shutdownRequested = false;
  
  	/** Reports working, blocked, done, and error states to terminals that support OSC 7501. */
@@ -8265,7 +8285,20 @@ index 268a7fa..6f6331f 100644
  	private readonly programStatus = new ProgramStatusReporter(
  		() => this.ui.terminal,
  		() => this.sessionManager.getSessionName(),
-@@ -1034,12 +1069,15 @@ export class InteractiveMode {
+@@ -814,12 +847,10 @@ export class InteractiveMode {
+ 			}));
+ 
+ 		// Build skill commands from session.skills (if enabled)
+-		this.skillCommands.clear();
+ 		const skillCommandList: SlashCommand[] = [];
+ 		if (this.settingsManager.getEnableSkillCommands()) {
+ 			for (const skill of this.session.resourceLoader.getSkills().skills) {
+ 				const commandName = `skill:${skill.name}`;
+-				this.skillCommands.set(commandName, skill.filePath);
+ 				skillCommandList.push({
+ 					name: commandName,
+ 					description: this.prefixAutocompleteDescription(skill.description, skill.sourceInfo),
+@@ -1034,12 +1065,15 @@ export class InteractiveMode {
  			const showDetails = this.shouldShowStartupDetails();
  			// Built on demand so the header follows theme changes. The logo's first line carries the version,
  			// its second line the first line of key hints. Terminals that cannot render the logo get a
@@ -8286,7 +8319,7 @@ index 268a7fa..6f6331f 100644
  			};
  
  			// Build startup instructions using keybinding hint helpers
-@@ -1084,7 +1122,10 @@ export class InteractiveMode {
+@@ -1084,7 +1118,10 @@ export class InteractiveMode {
  					`Press ${keyText("app.tools.expand")} to show full startup help${showDetails ? " and loaded resources" : ""}.`,
  				);
  			const onboarding = () =>
@@ -8298,7 +8331,7 @@ index 268a7fa..6f6331f 100644
  			const header = new BuiltInHeader(
  				() => `${withLogo(compactInstructions())}\n${compactOnboarding()}\n\n${onboarding()}`,
  				() => `${withLogo(expandedInstructions())}\n\n${onboarding()}`,
-@@ -1171,7 +1212,7 @@ export class InteractiveMode {
+@@ -1171,7 +1208,7 @@ export class InteractiveMode {
  	async run(): Promise<void> {
  		await this.init();
  
@@ -8307,7 +8340,7 @@ index 268a7fa..6f6331f 100644
  			const controller = new AbortController();
  			const timeout = setTimeout(() => controller.abort(), 15_000);
  			void refreshModelCatalogs(this.session.modelRuntime, controller.signal)
-@@ -1196,7 +1237,7 @@ export class InteractiveMode {
+@@ -1196,7 +1233,7 @@ export class InteractiveMode {
  			})
  			.finally(() => {
  				// On Windows, npm can overwrite the shared console title while checking
@@ -8316,7 +8349,7 @@ index 268a7fa..6f6331f 100644
  				if (process.platform === "win32" && this.isInitialized) {
  					this.updateTerminalTitle();
  				}
-@@ -1286,7 +1327,7 @@ export class InteractiveMode {
+@@ -1286,7 +1323,7 @@ export class InteractiveMode {
  	}
  
  	private async checkForPackageUpdates(): Promise<string[]> {
@@ -8325,7 +8358,7 @@ index 268a7fa..6f6331f 100644
  			return [];
  		}
  
-@@ -1344,7 +1385,7 @@ export class InteractiveMode {
+@@ -1344,7 +1381,7 @@ export class InteractiveMode {
  		}
  
  		if (extendedKeysFormat === "xterm") {
@@ -8334,7 +8367,7 @@ index 268a7fa..6f6331f 100644
  		}
  
  		return undefined;
-@@ -1426,7 +1467,7 @@ export class InteractiveMode {
+@@ -1426,7 +1463,7 @@ export class InteractiveMode {
  			if (newEntries.length > 0) {
  				this.settingsManager.setExtensionChangelogVersion(key, pkg.version);
  				const name = pkg.name || sourceInfo.source;
@@ -8343,7 +8376,7 @@ index 268a7fa..6f6331f 100644
  				const markdown = newEntries
  					.map((entry) => entry.content.replace(/^##\s+/, `## ${name} `))
  					.join("\n\n")
-@@ -1453,24 +1494,11 @@ export class InteractiveMode {
+@@ -1453,24 +1490,11 @@ export class InteractiveMode {
  		}
  	}
  
@@ -8373,7 +8406,7 @@ index 268a7fa..6f6331f 100644
  
  	private getMarkdownThemeWithSettings(): MarkdownTheme {
  		return {
-@@ -2179,6 +2207,7 @@ export class InteractiveMode {
+@@ -2179,6 +2203,7 @@ export class InteractiveMode {
  		}
  		this.footer.setSession(this.session);
  		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
@@ -8381,16 +8414,17 @@ index 268a7fa..6f6331f 100644
  		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
  		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
  		this.outputPad = this.settingsManager.getOutputPad();
-@@ -3281,7 +3310,7 @@ export class InteractiveMode {
+@@ -3281,6 +3306,9 @@ export class InteractiveMode {
  
  	private setupEditorSubmitHandler(): void {
  		this.defaultEditor.onSubmit = async (text: string) => {
--			text = text.trim();
-+			text = this.expandSkillMentions(text.trim());
++			// Skills are expanded once, in the session, so a message that names one is expanded the same way
++			// whether it arrived through this editor or through `-p`. Expanding here as well expanded the
++			// skill's own text, which mentions `/remember save` in its instructions.
+ 			text = text.trim();
  			if (!text) return;
  
- 			// Handle commands
-@@ -3471,12 +3500,19 @@ export class InteractiveMode {
+@@ -3471,12 +3499,19 @@ export class InteractiveMode {
  			// First, move any pending bash components to chat
  			this.flushPendingBashComponents();
  
@@ -8410,7 +8444,7 @@ index 268a7fa..6f6331f 100644
  		};
  	}
  
-@@ -3581,6 +3617,7 @@ export class InteractiveMode {
+@@ -3581,6 +3616,7 @@ export class InteractiveMode {
  				break;
  
  			case "message_start":
@@ -8418,7 +8452,7 @@ index 268a7fa..6f6331f 100644
  				if (event.message.role === "custom") {
  					this.addMessageToChat(event.message);
  					this.ui.requestRender();
-@@ -3642,6 +3679,14 @@ export class InteractiveMode {
+@@ -3642,6 +3678,14 @@ export class InteractiveMode {
  
  			case "message_end":
  				if (event.message.role === "user") break;
@@ -8433,7 +8467,7 @@ index 268a7fa..6f6331f 100644
  				if (this.streamingComponent && event.message.role === "assistant") {
  					this.streamingMessage = event.message;
  					let errorMessage: string | undefined;
-@@ -3724,6 +3769,8 @@ export class InteractiveMode {
+@@ -3724,6 +3768,8 @@ export class InteractiveMode {
  
  			case "tool_execution_end": {
  				if (event.isError) this.maybeShowInstallChangeWarning();
@@ -8442,7 +8476,7 @@ index 268a7fa..6f6331f 100644
  				const component = this.pendingTools.get(event.toolCallId);
  				if (component) {
  					component.updateResult({ ...event.result, isError: event.isError, durationMs: event.durationMs });
-@@ -3734,6 +3781,8 @@ export class InteractiveMode {
+@@ -3734,6 +3780,8 @@ export class InteractiveMode {
  			}
  
  			case "agent_end":
@@ -8451,7 +8485,7 @@ index 268a7fa..6f6331f 100644
  				if (this.settingsManager.getShowTerminalProgress()) {
  					this.ui.terminal.setProgress(false);
  				}
-@@ -4365,7 +4414,7 @@ export class InteractiveMode {
+@@ -4365,7 +4413,7 @@ export class InteractiveMode {
  				() =>
  					theme.fg(
  						"warning",
@@ -8460,7 +8494,7 @@ index 268a7fa..6f6331f 100644
  					),
  				1,
  				0,
-@@ -4451,6 +4500,13 @@ export class InteractiveMode {
+@@ -4451,6 +4499,13 @@ export class InteractiveMode {
  		this.stop();
  		await this.runtimeHost.dispose();
  
@@ -8474,7 +8508,7 @@ index 268a7fa..6f6331f 100644
  		const resumeCommand = formatResumeCommand(this.sessionManager);
  		if (resumeCommand) {
  			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
-@@ -4768,13 +4824,8 @@ export class InteractiveMode {
+@@ -4768,13 +4823,8 @@ export class InteractiveMode {
  		const updateInstruction = () =>
  			theme.fg("muted", `New version ${release.version} is available. Run `) +
  			theme.fg("accent", `${APP_NAME} update`);
@@ -8490,7 +8524,7 @@ index 268a7fa..6f6331f 100644
  		const note = release.note?.trim();
  
  		this.chatContainer.addChild(new Spacer(1));
-@@ -4789,7 +4840,6 @@ export class InteractiveMode {
+@@ -4789,7 +4839,6 @@ export class InteractiveMode {
  			);
  			this.chatContainer.addChild(new Spacer(1));
  		}
@@ -8498,7 +8532,7 @@ index 268a7fa..6f6331f 100644
  		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
  		this.ui.requestRender();
  	}
-@@ -4898,6 +4948,24 @@ export class InteractiveMode {
+@@ -4898,6 +4947,12 @@ export class InteractiveMode {
  		this.showStatus("Queued message for after compaction");
  	}
  
@@ -8507,23 +8541,11 @@ index 268a7fa..6f6331f 100644
 +	 * is what the user typed (or picked from the "/" menu); the block is what carries the content.
 +	 * Tags for skills that no longer exist are left as prose rather than silently dropped.
 +	 */
-+	private expandSkillMentions(text: string): string {
-+		return expandSkillMentionsInText(text, (name) => {
-+			const filePath = this.skillCommands.get(`skill:${name}`);
-+			if (!filePath) return undefined;
-+			try {
-+				const body = fs.readFileSync(filePath, "utf8").trim();
-+				return skillMentionFromFile(name, filePath, body);
-+			} catch {
-+				return undefined;
-+			}
-+		}, BUILTIN_COMMAND_NAMES);
-+	}
 +
  	private isExtensionCommand(text: string): boolean {
  		if (!text.startsWith("/")) return false;
  
-@@ -7214,6 +7282,25 @@ export class InteractiveMode {
+@@ -7214,6 +7269,25 @@ export class InteractiveMode {
  	private async handleCompactCommand(customInstructions?: string): Promise<void> {
  		this.clearStatusIndicator();
  

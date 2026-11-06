@@ -116,7 +116,6 @@ import {
 } from "../../core/session-manager.ts";
 import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS, BUILTIN_COMMAND_NAMES } from "../../core/slash-commands.ts";
-import { expandSkillMentions as expandSkillMentionsInText, skillMentionFromFile } from "../../core/skill-mentions.ts";
 import { getSourcePackageKey, type SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import { withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
@@ -565,7 +564,6 @@ export class InteractiveMode {
 	});
 
 	// Skill commands: command name -> skill file path
-	private skillCommands = new Map<string, string>();
 
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
@@ -849,12 +847,10 @@ export class InteractiveMode {
 			}));
 
 		// Build skill commands from session.skills (if enabled)
-		this.skillCommands.clear();
 		const skillCommandList: SlashCommand[] = [];
 		if (this.settingsManager.getEnableSkillCommands()) {
 			for (const skill of this.session.resourceLoader.getSkills().skills) {
 				const commandName = `skill:${skill.name}`;
-				this.skillCommands.set(commandName, skill.filePath);
 				skillCommandList.push({
 					name: commandName,
 					description: this.prefixAutocompleteDescription(skill.description, skill.sourceInfo),
@@ -3310,7 +3306,10 @@ export class InteractiveMode {
 
 	private setupEditorSubmitHandler(): void {
 		this.defaultEditor.onSubmit = async (text: string) => {
-			text = this.expandSkillMentions(text.trim());
+			// Skills are expanded once, in the session, so a message that names one is expanded the same way
+			// whether it arrived through this editor or through `-p`. Expanding here as well expanded the
+			// skill's own text, which mentions `/remember save` in its instructions.
+			text = text.trim();
 			if (!text) return;
 
 			// Handle commands
@@ -4953,18 +4952,6 @@ export class InteractiveMode {
 	 * is what the user typed (or picked from the "/" menu); the block is what carries the content.
 	 * Tags for skills that no longer exist are left as prose rather than silently dropped.
 	 */
-	private expandSkillMentions(text: string): string {
-		return expandSkillMentionsInText(text, (name) => {
-			const filePath = this.skillCommands.get(`skill:${name}`);
-			if (!filePath) return undefined;
-			try {
-				const body = fs.readFileSync(filePath, "utf8").trim();
-				return skillMentionFromFile(name, filePath, body);
-			} catch {
-				return undefined;
-			}
-		}, BUILTIN_COMMAND_NAMES);
-	}
 
 	private isExtensionCommand(text: string): boolean {
 		if (!text.startsWith("/")) return false;

@@ -69,6 +69,19 @@ describe("expandSkillMentions", () => {
 		expect(out).toContain("References are relative to /skills/remember.");
 	});
 
+	it("expands exactly once, even when the skill body names itself", () => {
+		// The remember skill's instructions say `/remember save` and `/remember restore`. A second pass
+		// over expanded text inserted the skill again for each mention, nine times, breaking the block
+		// parser so the whole thing rendered as one user message.
+		const selfNaming: SkillMention = {
+			...remember,
+			body: "# Remember\n\nEvery session ends with `/remember save`.\nEvery session starts with `/remember restore`.",
+		};
+		const once = expandSkillMentions("/remember restore the ios folder", (n) => (n === "remember" ? selfNaming : undefined), builtins);
+		expect(once.match(/<skill name=/g)?.length).toBe(1);
+		expect(expandSkillMentions(once, (n) => (n === "remember" ? selfNaming : undefined), builtins)).toBe(once);
+	});
+
 	it("renders one block from a skill without re-reading its file", () => {
 		expect(renderSkillBlock(remember)).toContain("Step 2. Write the file.");
 	});
