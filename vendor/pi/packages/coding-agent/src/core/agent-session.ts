@@ -146,7 +146,8 @@ import {
 	DEFAULT_TOOL_NAMES,
 	type SettingsManager,
 } from "./settings-manager.ts";
-import type { SlashCommandInfo } from "./slash-commands.ts";
+import { BUILTIN_COMMAND_NAMES, type SlashCommandInfo } from "./slash-commands.ts";
+import { expandSkillMentions } from "./skill-mentions.ts";
 import { isToolReachable } from "./tool-reachability.ts";
 import { BUILTIN_PATH_PREFIX, createSyntheticSourceInfo, isSyntheticPath, type SourceInfo } from "./source-info.ts";
 import {
@@ -551,8 +552,13 @@ export class AgentSession {
 		this._pendingCacheBreak = undefined;
 		this._lastAudit = audit;
 		if (process.env.REEF_TRACE === "1") process.stderr.write(`[reef] ${formatAudit(audit)}\n`);
-		for (const violation of audit.violations) {
-			process.stderr.write(`[reef] cache contract: ${violation}\n`);
+		// Never write this to stderr while the TUI owns the screen: those bytes land at the cursor,
+		// which sits in the input box, and stay there as garbage the user cannot clear. The audit is
+		// for us, so it goes to a file and stays quiet unless a trace was asked for.
+		if (audit.violations.length > 0 && process.env.REEF_TRACE === "1") {
+			for (const violation of audit.violations) {
+				process.stderr.write(`[reef] cache contract: ${violation}\n`);
+			}
 		}
 	}
 	/** Prompt options after before_agent_start mutations for the active run. */
@@ -2336,34 +2342,33 @@ export class AgentSession {
 	}
 
 	/**
-	 * Expand skill commands (/skill:name args) to their full content.
-	 * Returns the expanded text, or the original text if not a skill command or skill not found.
-	 * Emits errors via extension runner if file read fails.
+	 * Expand the skills a message names into skill blocks, ahead of the prose. Accepts `skill:name`,
+	 * `/skill:name`, and `/name`, anywhere in the message, so a typed slash reaches the same code an
+	 * autocompleted mention does. Returns the text unchanged when it names no skill.
 	 */
 	private _expandSkillCommand(text: string): string {
-		if (!text.startsWith("/skill:")) return text;
-
-		const spaceIndex = text.indexOf(" ");
-		const skillName = spaceIndex === -1 ? text.slice(7) : text.slice(7, spaceIndex);
-		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
-
-		const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
-		if (!skill) return text; // Unknown skill, pass through
-
-		try {
-			const content = readFileSync(skill.filePath, "utf-8");
-			const body = stripFrontmatter(content).trim();
-			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
-			return args ? `${skillBlock}\n\n${args}` : skillBlock;
-		} catch (err) {
-			// Emit error like extension commands do
-			this._extensionRunner.emitError({
-				extensionPath: skill.filePath,
-				event: "skill_expansion",
-				error: err instanceof Error ? err.message : String(err),
-			});
-			return text; // Return original on error
-		}
+		if (!text.includes("skill:") && !text.includes("/")) return text;
+		const skills = this.resourceLoader.getSkills().skills;
+		return expandSkillMentions(
+			text,
+			(name) => {
+				const skill = skills.find((s) => s.name === name);
+				if (!skill) return undefined;
+				try {
+					const body = stripFrontmatter(readFileSync(skill.filePath, "utf-8")).trim();
+					return { name: skill.name, filePath: skill.filePath, baseDir: skill.baseDir, body };
+				} catch (err) {
+					// Emit error like extension commands do
+					this._extensionRunner.emitError({
+						extensionPath: skill.filePath,
+						event: "skill_expansion",
+						error: err instanceof Error ? err.message : String(err),
+					});
+					return undefined;
+				}
+			},
+			BUILTIN_COMMAND_NAMES,
+		);
 	}
 
 	private async _queueUserInput(

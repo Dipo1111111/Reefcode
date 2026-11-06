@@ -114,6 +114,20 @@ export function retargetMouseEvent(event: TuiMouseEvent, target: TuiMouseDispatc
 	};
 }
 
+/** Keys that remove the character(s) before or under the cursor. */
+function isDeleteKey(data: string): boolean {
+	return matchesKey(data, "backspace") || matchesKey(data, "delete");
+}
+
+/**
+ * A selection in a component's own cells, the convention `handleMouse` already uses: row 0 is the
+ * component's first row, column 0 its first column. `end` is exclusive.
+ */
+export interface ComponentSelection {
+	start: { row: number; col: number };
+	end: { row: number; col: number };
+}
+
 export interface Component {
 	/**
 	 * Render the component to lines for the given viewport width
@@ -127,6 +141,15 @@ export interface Component {
 
 	/** Optional normalized mouse handler. */
 	handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
+
+	/**
+	 * Delete the text under a selection the renderer owns. The renderer draws the highlight, so only
+	 * the renderer knows what is selected; the component knows what the text is. Returns true when
+	 * the component deleted something, so the renderer can clear its selection and skip the key.
+	 *
+	 * Coordinates follow `ComponentSelection`: component-local cells, `end` exclusive.
+	 */
+	deleteSelection?(selection: ComponentSelection): boolean;
 
 	/**
 	 * If true, component receives key release events (Kitty protocol).
@@ -1041,6 +1064,17 @@ export abstract class TuiBase extends Container implements TUI {
 		process.nextTick(() => this.scheduleRender());
 	}
 
+	/**
+	 * The renderer's active text selection, in the focused component's own coordinates. The base
+	 * renderer has no selection; the alt screen does.
+	 */
+	protected getActiveSelection(): ComponentSelection | undefined {
+		return undefined;
+	}
+
+	/** Drop the renderer's selection after the focused component acted on it. */
+	protected clearActiveSelection(): void {}
+
 	private requestImmediateRender(): void {
 		this.cancelRenderTimer();
 		this.renderRequested = true;
@@ -1154,6 +1188,17 @@ export abstract class TuiBase extends Container implements TUI {
 			// Filter out key release events unless component opts in
 			if (isKeyRelease(data) && !this.focusedComponent.wantsKeyRelease) {
 				return;
+			}
+			// A renderer-owned selection beats the key: pressing delete with text highlighted removes
+			// the highlighted text, not one character. The component knows the text, the renderer
+			// knows the selection, so the renderer hands the range over and the component deletes it.
+			if (this.focusedComponent.deleteSelection && isDeleteKey(data)) {
+				const selection = this.getActiveSelection();
+				if (selection && this.focusedComponent.deleteSelection(selection)) {
+					this.clearActiveSelection();
+					this.requestImmediateRender();
+					return;
+				}
 			}
 			this.focusedComponent.handleInput(data);
 			// Keyboard input is latency-sensitive. Avoid the throttled timer path,

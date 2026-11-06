@@ -226,18 +226,21 @@ export class ModelRuntime implements Models {
 				? new FileModelsStore(options.modelsStorePath ?? join(dirname(modelsPath), "models-store.json"))
 				: new InMemoryCodingAgentModelsStore());
 		const builtinModelDataGeneratedAt = builtinProviderCatalog.getBuiltinModelDataGeneratedAt();
+		// Remote model catalogues are opt-in: without a base URL, the models shipped with this build
+		// are the only models, and REEF contacts nobody to find out what a provider offers.
+		const catalogBaseUrl = options.catalogBaseUrl ?? process.env.REEF_CATALOG_URL;
 		const providers = builtinProviderCatalog.builtinProviders().map((provider) => {
-			if (provider.id === "radius") return provider;
+			if (provider.id === "radius" || !catalogBaseUrl) return provider;
 			// OpenRouter narrows the catalog to the models, limits and prices of the user's key.
 			if (provider.id === "openrouter") {
 				return withPersonalizedCatalog(
 					provider,
 					personalizeOpenRouterCatalog,
-					options.catalogBaseUrl,
+					catalogBaseUrl,
 					builtinModelDataGeneratedAt,
 				);
 			}
-			return withRemoteCatalog(provider, options.catalogBaseUrl, builtinModelDataGeneratedAt);
+			return withRemoteCatalog(provider, catalogBaseUrl, builtinModelDataGeneratedAt);
 		});
 		const runtime = new ModelRuntime(
 			credentials,

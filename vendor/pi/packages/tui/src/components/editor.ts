@@ -10,6 +10,7 @@ import {
 	type TUI,
 	type TuiMouseEvent,
 	type TuiMouseEventResult,
+	type ComponentSelection,
 } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
 import {
@@ -315,6 +316,8 @@ export class Editor implements Component, Focusable {
 
 	// Store last render geometry for cursor navigation and mouse hit-testing.
 	private lastWidth: number = 80;
+	/** Horizontal padding used by the last render, so renderer cells map back to text columns. */
+	private lastPaddingX = 0;
 	private renderedVisibleLineCount = 1;
 	private renderedAutocompleteHeight = 0;
 
@@ -534,6 +537,7 @@ export class Editor implements Component, Focusable {
 
 		// Store for cursor navigation (must match wrapping width)
 		this.lastWidth = layoutWidth;
+		this.lastPaddingX = paddingX;
 
 		// Layout the text
 		const layoutLines = this.layoutText(layoutWidth);
@@ -633,6 +637,58 @@ export class Editor implements Component, Focusable {
 		}
 
 		return result;
+	}
+
+	/**
+	 * Delete the text under a selection the renderer owns (component-local cells, `end` exclusive).
+	 * One undo step. Returns false when the selection covers no text, so the key keeps its normal meaning.
+	 */
+	deleteSelection(selection: ComponentSelection): boolean {
+		const from = this.selectionCellToText(selection.start, false);
+		const to = this.selectionCellToText(selection.end, true);
+		if (!from || !to) return false;
+		const nonEmpty = from.line < to.line || (from.line === to.line && from.col < to.col);
+		if (!nonEmpty) return false;
+
+		this.pushUndoSnapshot();
+		this.exitHistoryBrowsing();
+		this.lastAction = null;
+		const head = (this.state.lines[from.line] ?? "").slice(0, from.col);
+		const tail = (this.state.lines[to.line] ?? "").slice(to.col);
+		this.state.lines.splice(from.line, to.line - from.line + 1, head + tail);
+		this.state.cursorLine = from.line;
+		this.setCursorCol(from.col);
+		if (this.autocompleteState) this.updateAutocomplete();
+		if (this.onChange) this.onChange(this.getText());
+		return true;
+	}
+
+	/** Map a component-local cell to a logical text position, using the same wrapping the render used. */
+	private selectionCellToText(
+		cell: { row: number; col: number },
+		isEnd: boolean,
+	): { line: number; col: number } | undefined {
+		const visualLines = this.buildVisualLineMap(this.lastWidth);
+		if (visualLines.length === 0) return undefined;
+		// Row 0 is the top border, so content rows run 1..renderedVisibleLineCount, as in handleMouse.
+		const row = Math.max(1, Math.min(this.renderedVisibleLineCount, cell.row));
+		const visual = visualLines[Math.max(0, Math.min(visualLines.length - 1, this.scrollOffset + row - 1))];
+		if (!visual) return undefined;
+		const logical = this.state.lines[visual.logicalLine] ?? "";
+		const chunk = logical.slice(visual.startCol, visual.startCol + visual.length);
+		const contentCol = Math.max(0, cell.col - this.lastPaddingX);
+		let column = 0;
+		let offset = chunk.length;
+		for (const grapheme of this.segment(chunk, "grapheme")) {
+			const width = visibleWidth(grapheme.segment);
+			// Start: include the grapheme under the cell. End: stop before the first grapheme starting at the cell.
+			if (isEnd ? column >= contentCol : column + width > contentCol) {
+				offset = grapheme.index;
+				break;
+			}
+			column += width;
+		}
+		return { line: visual.logicalLine, col: visual.startCol + offset };
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {

@@ -1513,7 +1513,7 @@ index 5a9552d..8f0f0e2 100644
  }
  
 diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
-index a0dda03..7eecafc 100644
+index a0dda03..f73ee5f 100644
 --- a/packages/coding-agent/src/core/agent-session.ts
 +++ b/packages/coding-agent/src/core/agent-session.ts
 @@ -80,6 +80,14 @@ import {
@@ -1531,15 +1531,18 @@ index a0dda03..7eecafc 100644
  import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
  import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
  import {
-@@ -139,6 +147,7 @@ import {
+@@ -138,7 +146,9 @@ import {
+ 	DEFAULT_TOOL_NAMES,
  	type SettingsManager,
  } from "./settings-manager.ts";
- import type { SlashCommandInfo } from "./slash-commands.ts";
+-import type { SlashCommandInfo } from "./slash-commands.ts";
++import { BUILTIN_COMMAND_NAMES, type SlashCommandInfo } from "./slash-commands.ts";
++import { expandSkillMentions } from "./skill-mentions.ts";
 +import { isToolReachable } from "./tool-reachability.ts";
  import { BUILTIN_PATH_PREFIX, createSyntheticSourceInfo, isSyntheticPath, type SourceInfo } from "./source-info.ts";
  import {
  	buildSystemPrompt,
-@@ -496,6 +505,56 @@ export class AgentSession {
+@@ -496,6 +506,61 @@ export class AgentSession {
  	private _toolPromptGuidelines: Map<string, string[]> = new Map();
  
  	private _baseSystemPromptOptions!: NormalizedBuildSystemPromptOptions;
@@ -1589,14 +1592,19 @@ index a0dda03..7eecafc 100644
 +		this._pendingCacheBreak = undefined;
 +		this._lastAudit = audit;
 +		if (process.env.REEF_TRACE === "1") process.stderr.write(`[reef] ${formatAudit(audit)}\n`);
-+		for (const violation of audit.violations) {
-+			process.stderr.write(`[reef] cache contract: ${violation}\n`);
++		// Never write this to stderr while the TUI owns the screen: those bytes land at the cursor,
++		// which sits in the input box, and stay there as garbage the user cannot clear. The audit is
++		// for us, so it goes to a file and stays quiet unless a trace was asked for.
++		if (audit.violations.length > 0 && process.env.REEF_TRACE === "1") {
++			for (const violation of audit.violations) {
++				process.stderr.write(`[reef] cache contract: ${violation}\n`);
++			}
 +		}
 +	}
  	/** Prompt options after before_agent_start mutations for the active run. */
  	private _runSystemPromptOptions?: NormalizedBuildSystemPromptOptions;
  
-@@ -935,6 +994,9 @@ export class AgentSession {
+@@ -935,6 +1000,9 @@ export class AgentSession {
  			const updateMessage = this._preparePromptAndToolLoadout(options, nextContext.messages);
  			// Keep session.systemPrompt and ctx.getSystemPrompt() in step with what the provider sees.
  			this._runSystemPromptOptions = options;
@@ -1606,7 +1614,7 @@ index a0dda03..7eecafc 100644
  
  			return {
  				...previousSnapshot,
-@@ -1604,10 +1666,30 @@ export class AgentSession {
+@@ -1604,10 +1672,30 @@ export class AgentSession {
  	 * `codemode` or `deferred` tool.
  	 */
  	private _getCallableTools(active: ReadonlySet<string> = new Set(this.getActiveToolNames())): AgentTool[] {
@@ -1641,7 +1649,7 @@ index a0dda03..7eecafc 100644
  	}
  
  	/**
-@@ -1664,7 +1746,9 @@ export class AgentSession {
+@@ -1664,7 +1752,9 @@ export class AgentSession {
  			});
  		}
  		this._hiddenDeclarations = hidden;
@@ -1652,7 +1660,7 @@ index a0dda03..7eecafc 100644
  		return declared;
  	}
  
-@@ -1791,10 +1875,9 @@ export class AgentSession {
+@@ -1791,10 +1881,9 @@ export class AgentSession {
  		options.selectedTools = this._applyToolLoadout(options.selectedTools).map((tool) => tool.name);
  		// The tool list and rules must match the declarations the request carries.
  		options.hiddenTools = [...this._hiddenDeclarations];
@@ -1666,7 +1674,7 @@ index a0dda03..7eecafc 100644
  		return sections ? { role: "system", content: "", sections, timestamp: Date.now() } : undefined;
  	}
  
-@@ -2002,6 +2085,8 @@ export class AgentSession {
+@@ -2002,6 +2091,8 @@ export class AgentSession {
  		const updateMessage = this._preparePromptAndToolLoadout(result.systemPromptOptions);
  		this._runSystemPromptOptions = result.systemPromptOptions;
  		if (updateMessage) messages.unshift(updateMessage);
@@ -1675,7 +1683,67 @@ index a0dda03..7eecafc 100644
  		return messages;
  	}
  
-@@ -2887,9 +2972,44 @@ export class AgentSession {
+@@ -2251,34 +2342,33 @@ export class AgentSession {
+ 	}
+ 
+ 	/**
+-	 * Expand skill commands (/skill:name args) to their full content.
+-	 * Returns the expanded text, or the original text if not a skill command or skill not found.
+-	 * Emits errors via extension runner if file read fails.
++	 * Expand the skills a message names into skill blocks, ahead of the prose. Accepts `skill:name`,
++	 * `/skill:name`, and `/name`, anywhere in the message, so a typed slash reaches the same code an
++	 * autocompleted mention does. Returns the text unchanged when it names no skill.
+ 	 */
+ 	private _expandSkillCommand(text: string): string {
+-		if (!text.startsWith("/skill:")) return text;
+-
+-		const spaceIndex = text.indexOf(" ");
+-		const skillName = spaceIndex === -1 ? text.slice(7) : text.slice(7, spaceIndex);
+-		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
+-
+-		const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
+-		if (!skill) return text; // Unknown skill, pass through
+-
+-		try {
+-			const content = readFileSync(skill.filePath, "utf-8");
+-			const body = stripFrontmatter(content).trim();
+-			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
+-			return args ? `${skillBlock}\n\n${args}` : skillBlock;
+-		} catch (err) {
+-			// Emit error like extension commands do
+-			this._extensionRunner.emitError({
+-				extensionPath: skill.filePath,
+-				event: "skill_expansion",
+-				error: err instanceof Error ? err.message : String(err),
+-			});
+-			return text; // Return original on error
+-		}
++		if (!text.includes("skill:") && !text.includes("/")) return text;
++		const skills = this.resourceLoader.getSkills().skills;
++		return expandSkillMentions(
++			text,
++			(name) => {
++				const skill = skills.find((s) => s.name === name);
++				if (!skill) return undefined;
++				try {
++					const body = stripFrontmatter(readFileSync(skill.filePath, "utf-8")).trim();
++					return { name: skill.name, filePath: skill.filePath, baseDir: skill.baseDir, body };
++				} catch (err) {
++					// Emit error like extension commands do
++					this._extensionRunner.emitError({
++						extensionPath: skill.filePath,
++						event: "skill_expansion",
++						error: err instanceof Error ? err.message : String(err),
++					});
++					return undefined;
++				}
++			},
++			BUILTIN_COMMAND_NAMES,
++		);
+ 	}
+ 
+ 	private async _queueUserInput(
+@@ -2887,9 +2977,44 @@ export class AgentSession {
  	 *
  	 * @param customInstructions Optional instructions for the compaction summary
  	 */
@@ -1720,7 +1788,7 @@ index a0dda03..7eecafc 100644
  		this._emit({ type: "compaction_start", reason: "manual" });
  		let fromExtension = false;
  		let cancelledByExtension = false;
-@@ -3586,6 +3706,8 @@ export class AgentSession {
+@@ -3586,6 +3711,8 @@ export class AgentSession {
  				},
  				getSystemPrompt: () => this.systemPrompt,
  				getSystemPromptOptions: () => this._baseSystemPromptOptions,
@@ -1777,6 +1845,34 @@ index 60e94dd..bb896b1 100644
  	if (retention === "none") return undefined;
  	const seconds = model.promptCache?.[retention];
  	return seconds === undefined ? undefined : seconds * 1000;
+diff --git a/packages/coding-agent/src/core/client-identity.ts b/packages/coding-agent/src/core/client-identity.ts
+index 555b1da..ff1b947 100644
+--- a/packages/coding-agent/src/core/client-identity.ts
++++ b/packages/coding-agent/src/core/client-identity.ts
+@@ -1,16 +1,17 @@
+-import { type ClientIdentity, PI_ATTRIBUTION } from "@earendil-works/pi-ai";
++import type { ClientIdentity } from "@earendil-works/pi-ai";
+ import { VERSION } from "../config.ts";
+ import type { SettingsManager } from "./settings-manager.ts";
+-import { isInstallTelemetryEnabled } from "./telemetry.ts";
+ 
+ /**
+- * How pi's requests identify it to providers: a detailed `User-Agent` with pi's version, and attribution to pi as a
+- * CLI agent while install telemetry is enabled.
++ * How REEF's requests identify it to providers: a detailed `User-Agent` carrying REEF's own version.
++ *
++ * No attribution, ever. Attribution tells the provider that a named third-party CLI agent made the
++ * request; REEF runs on the vendored core, ships no telemetry, and has nothing to report to anyone.
+  */
+-export function getClientIdentity(settingsManager: SettingsManager): ClientIdentity {
++export function getClientIdentity(_settingsManager: SettingsManager): ClientIdentity {
+ 	return {
+ 		userAgent: "detailed",
+ 		version: VERSION,
+-		attribution: isInstallTelemetryEnabled(settingsManager) ? PI_ATTRIBUTION : null,
++		attribution: null,
+ 	};
+ }
 diff --git a/packages/coding-agent/src/core/experimental.ts b/packages/coding-agent/src/core/experimental.ts
 index 12d33c7..6dcc867 100644
 --- a/packages/coding-agent/src/core/experimental.ts
@@ -1823,10 +1919,35 @@ index 142451e..774ff9d 100644
  	executeTool?: (
  		callerId: string,
 diff --git a/packages/coding-agent/src/core/model-runtime.ts b/packages/coding-agent/src/core/model-runtime.ts
-index 6a5520d..ba198e2 100644
+index 6a5520d..15f0d7e 100644
 --- a/packages/coding-agent/src/core/model-runtime.ts
 +++ b/packages/coding-agent/src/core/model-runtime.ts
-@@ -245,7 +245,7 @@ export class ModelRuntime implements Models {
+@@ -226,18 +226,21 @@ export class ModelRuntime implements Models {
+ 				? new FileModelsStore(options.modelsStorePath ?? join(dirname(modelsPath), "models-store.json"))
+ 				: new InMemoryCodingAgentModelsStore());
+ 		const builtinModelDataGeneratedAt = builtinProviderCatalog.getBuiltinModelDataGeneratedAt();
++		// Remote model catalogues are opt-in: without a base URL, the models shipped with this build
++		// are the only models, and REEF contacts nobody to find out what a provider offers.
++		const catalogBaseUrl = options.catalogBaseUrl ?? process.env.REEF_CATALOG_URL;
+ 		const providers = builtinProviderCatalog.builtinProviders().map((provider) => {
+-			if (provider.id === "radius") return provider;
++			if (provider.id === "radius" || !catalogBaseUrl) return provider;
+ 			// OpenRouter narrows the catalog to the models, limits and prices of the user's key.
+ 			if (provider.id === "openrouter") {
+ 				return withPersonalizedCatalog(
+ 					provider,
+ 					personalizeOpenRouterCatalog,
+-					options.catalogBaseUrl,
++					catalogBaseUrl,
+ 					builtinModelDataGeneratedAt,
+ 				);
+ 			}
+-			return withRemoteCatalog(provider, options.catalogBaseUrl, builtinModelDataGeneratedAt);
++			return withRemoteCatalog(provider, catalogBaseUrl, builtinModelDataGeneratedAt);
+ 		});
+ 		const runtime = new ModelRuntime(
+ 			credentials,
+@@ -245,7 +248,7 @@ export class ModelRuntime implements Models {
  			modelsPath,
  			modelsStore,
  			providers,
@@ -1869,12 +1990,42 @@ index c37b7a5..88f3610 100644
  export function getRadiusGatewayUrl(): string {
  	return normalizeRadiusGatewayUrl(process.env[ENV_RADIUS_GATEWAY] ?? DEFAULT_RADIUS_GATEWAY);
  }
+diff --git a/packages/coding-agent/src/core/remote-catalog-provider.ts b/packages/coding-agent/src/core/remote-catalog-provider.ts
+index 8f945f7..2e9fe20 100644
+--- a/packages/coding-agent/src/core/remote-catalog-provider.ts
++++ b/packages/coding-agent/src/core/remote-catalog-provider.ts
+@@ -11,7 +11,6 @@ import { VERSION } from "../config.ts";
+ import { fetchWithRetry } from "../utils/management-http.ts";
+ import { getPiUserAgent } from "../utils/pi-user-agent.ts";
+ 
+-const DEFAULT_CATALOG_BASE_URL = "https://pi.dev";
+ const REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS = 4_000;
+ export const REMOTE_CATALOG_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
+ /**
+@@ -103,7 +102,7 @@ export type PersonalizeCatalog = (
+ /** Add a persisted pi.dev catalog overlay to a static built-in provider. */
+ export function withRemoteCatalog(
+ 	provider: Provider,
+-	catalogBaseUrl: string = DEFAULT_CATALOG_BASE_URL,
++	catalogBaseUrl: string,
+ 	localGeneratedAt?: number,
+ ): Provider {
+ 	let dynamicModels: readonly AnyModel[] = [];
+@@ -195,7 +194,7 @@ export function withRemoteCatalog(
+ export function withPersonalizedCatalog(
+ 	provider: Provider,
+ 	personalize: PersonalizeCatalog,
+-	catalogBaseUrl: string = DEFAULT_CATALOG_BASE_URL,
++	catalogBaseUrl: string,
+ 	localGeneratedAt?: number,
+ ): Provider {
+ 	let personalModels: readonly AnyModel[] = [];
 diff --git a/packages/coding-agent/src/core/request-audit.test.ts b/packages/coding-agent/src/core/request-audit.test.ts
 new file mode 100644
-index 0000000..fc19139
+index 0000000..cf0f4da
 --- /dev/null
 +++ b/packages/coding-agent/src/core/request-audit.test.ts
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,165 @@
 +import { describe, expect, it } from "vitest";
 +import { applySectionBudgets, estimateTokens, orderSections, RequestAuditor, SECTION_BUDGETS } from "./request-audit.ts";
 +
@@ -1955,6 +2106,19 @@ index 0000000..fc19139
 +		expect(audit.violations[0]).toContain("message 0 changed");
 +	});
 +
++	it("ignores the cache_control markers a provider adds on the way out", () => {
++		// Regression: adapters annotate the last block in place, the hash changed, and the audit wrote
++		// "message 0 changed after it was sent" over the input box for a request that never changed.
++		const auditor = new RequestAuditor();
++		const messages = [
++			{ role: "user", content: [{ type: "text", text: "hi" }] as { type: string; text: string; cache_control?: unknown }[] },
++		];
++		auditor.observe({ sections: sections(), tools: ["script"], messages });
++		messages[0]!.content[0]!.cache_control = { type: "ephemeral" };
++		const audit = auditor.observe({ sections: sections(), tools: ["script"], messages });
++		expect(audit.appendOnly).toBe(true);
++	});
++
 +	it("catches a section edit mid-session", () => {
 +		const auditor = new RequestAuditor();
 +		const messages = [{ role: "user", content: "hi" }];
@@ -2029,10 +2193,10 @@ index 0000000..fc19139
 +});
 diff --git a/packages/coding-agent/src/core/request-audit.ts b/packages/coding-agent/src/core/request-audit.ts
 new file mode 100644
-index 0000000..1734c02
+index 0000000..8dce59c
 --- /dev/null
 +++ b/packages/coding-agent/src/core/request-audit.ts
-@@ -0,0 +1,363 @@
+@@ -0,0 +1,392 @@
 +/**
 + * The request compiler's instruments: section budgets, volatility ordering, and the cache contract.
 + *
@@ -2225,12 +2389,41 @@ index 0000000..1734c02
 +	at: number;
 +}
 +
++/**
++ * Provider adapters annotate the blocks they send with `cache_control` and its ttl, in place. Those
++ * keys are not part of what the model sees, so they must not count as the message changing: the
++ * audit reported "message 0 changed after it was sent" on a request that was byte-identical, and
++ * wrote the line over the input box.
++ */
++function stripSendMarkers(_key: string, value: unknown): unknown {
++	return _key === "cache_control" ? undefined : value;
++}
++
++/**
++ * The text a message contributes to the prompt, whatever shape it arrived in. A string and the
++ * single text block that replaces it on the wire are the same prompt, and the compiler rewrites one
++ * into the other in place: hashing the raw JSON reported a cache break on a request that was
++ * identical, and printed the warning over the input box.
++ */
++function contentText(content: unknown): string {
++	if (typeof content === "string") return content;
++	if (!Array.isArray(content)) return JSON.stringify(content ?? "", stripSendMarkers);
++	return content
++		.map((block) => {
++			if (typeof block === "string") return block;
++			if (block && typeof block === "object") {
++				const text = (block as { text?: unknown }).text;
++				if (typeof text === "string") return text;
++			}
++			return JSON.stringify(block, stripSendMarkers);
++		})
++		.join("\u0002");
++}
++
 +function messageText(message: unknown): string {
 +	const candidate = message as { role?: string; content?: unknown } | undefined;
 +	const role = candidate?.role ?? "unknown";
-+	const content = candidate?.content;
-+	const text = typeof content === "string" ? content : JSON.stringify(content ?? "");
-+	return `${role}\u0000${text}`;
++	return `${role}\u0000${contentText(candidate?.content)}`;
 +}
 +
 +function messageKey(message: unknown): string {
@@ -2397,9 +2590,18 @@ index 0000000..1734c02
 +	return `request ${audit.request} · ${audit.tokens} tok · cache ${audit.cacheablePrefixTokens} tok · ${state}`;
 +}
 diff --git a/packages/coding-agent/src/core/settings-defaults.ts b/packages/coding-agent/src/core/settings-defaults.ts
-index 1f90280..c78d653 100644
+index 1f90280..15fab5c 100644
 --- a/packages/coding-agent/src/core/settings-defaults.ts
 +++ b/packages/coding-agent/src/core/settings-defaults.ts
+@@ -29,7 +29,7 @@ export const SETTINGS_DEFAULTS = {
+ 	quietStartup: false,
+ 	defaultProjectTrust: "ask",
+ 	collapseChangelog: false,
+-	enableInstallTelemetry: true,
++	enableInstallTelemetry: false,
+ 	enableAnalytics: false,
+ 	enableSkillCommands: true,
+ 	terminal: {
 @@ -58,6 +58,16 @@ export const SETTINGS_DEFAULTS = {
  		mode: "on",
  		inlineBudget: 3000,
@@ -2524,6 +2726,160 @@ index 1ef7973..b505597 100644
  export type DefaultProjectTrust = NonNullable<SettingsInput["defaultProjectTrust"]>;
  export type QuietStartup = NonNullable<SettingsInput["quietStartup"]>;
  export type TransportSetting = NonNullable<SettingsInput["transport"]>;
+diff --git a/packages/coding-agent/src/core/skill-mentions.test.ts b/packages/coding-agent/src/core/skill-mentions.test.ts
+new file mode 100644
+index 0000000..f1b7bb9
+--- /dev/null
++++ b/packages/coding-agent/src/core/skill-mentions.test.ts
+@@ -0,0 +1,75 @@
++import { describe, expect, it } from "vitest";
++import { expandSkillMentions, renderSkillBlock, type SkillMention } from "./skill-mentions.ts";
++
++const remember: SkillMention = {
++	name: "remember",
++	filePath: "/skills/remember/SKILL.md",
++	baseDir: "/skills/remember",
++	body: "# Remember\n\nStep 1. Read the file.\nStep 2. Write the file.",
++};
++const design: SkillMention = { ...remember, name: "design-taste-frontend" };
++const known = new Map([remember, design].map((skill) => [skill.name, skill]));
++const resolve = (name: string) => known.get(name);
++const builtins = new Set(["model", "settings", "export"]);
++
++describe("expandSkillMentions", () => {
++	it("expands skill:name", () => {
++		const out = expandSkillMentions("skill:remember save this", resolve, builtins);
++		expect(out).toContain('<skill name="remember"');
++		expect(out).toContain("Step 1. Read the file.");
++		expect(out.endsWith("save this")).toBe(true);
++	});
++
++	it("expands the legacy /skill:name spelling", () => {
++		const out = expandSkillMentions("/skill:remember save this", resolve, builtins);
++		expect(out).toContain('<skill name="remember"');
++		expect(out.endsWith("save this")).toBe(true);
++	});
++
++	it("expands a typed /name", () => {
++		const out = expandSkillMentions("/remember save this", resolve, builtins);
++		expect(out).toContain('<skill name="remember"');
++		expect(out).toContain("save this");
++	});
++
++	it("expands a slash mention mid-message", () => {
++		const out = expandSkillMentions("please /remember this session", resolve, builtins);
++		expect(out).toContain('<skill name="remember"');
++		expect(out).toContain("please this session");
++	});
++
++	it("leaves a leading built-in command alone", () => {
++		expect(expandSkillMentions("/model fast", resolve, builtins)).toBe("/model fast");
++		expect(expandSkillMentions("/settings", resolve, builtins)).toBe("/settings");
++	});
++
++	it("expands a skill whose name collides with a built-in when it is not leading", () => {
++		const withModel = new Map(known).set("model", { ...remember, name: "model" });
++		const out = expandSkillMentions("use /model here", (n) => withModel.get(n), builtins);
++		expect(out).toContain('<skill name="model"');
++	});
++
++	it("keeps every block when a message names several skills", () => {
++		const out = expandSkillMentions("/remember and skill:design-taste-frontend then go", resolve, builtins);
++		expect(out.match(/<skill name=/g)?.length).toBe(2);
++	});
++
++	it("leaves unknown names as typed", () => {
++		expect(expandSkillMentions("/nope do a thing", resolve, builtins)).toBe("/nope do a thing");
++	});
++
++	it("does not touch paths and ordinary prose", () => {
++		const text = "read src/index.ts and /usr/local/bin, then report at /tmp";
++		expect(expandSkillMentions(text, resolve, builtins)).toBe(text);
++	});
++
++	it("carries the batching directive and the reference base into every block", () => {
++		const out = expandSkillMentions("/remember go", resolve, builtins);
++		expect(out).toContain("Run this procedure in as few turns as possible");
++		expect(out).toContain("References are relative to /skills/remember.");
++	});
++
++	it("renders one block from a skill without re-reading its file", () => {
++		expect(renderSkillBlock(remember)).toContain("Step 2. Write the file.");
++	});
++});
+diff --git a/packages/coding-agent/src/core/skill-mentions.ts b/packages/coding-agent/src/core/skill-mentions.ts
+new file mode 100644
+index 0000000..0bb9265
+--- /dev/null
++++ b/packages/coding-agent/src/core/skill-mentions.ts
+@@ -0,0 +1,67 @@
++import { dirname } from "node:path";
++
++/**
++ * A skill that a message can name: its file, and the directory references inside it resolve against.
++ */
++export interface SkillMention {
++	name: string;
++	filePath: string;
++	baseDir: string;
++	/** The skill body, frontmatter already stripped. */
++	body: string;
++}
++
++/**
++ * Written above every skill body. A skill is a procedure, and procedures are written one step at a
++ * time. Without this line the model replayed each step as its own turn: nine discovery calls on a
++ * restore that needed two. The steps do not change; the batching does.
++ */
++export const SKILL_BATCHING_DIRECTIVE =
++	"Run this procedure in as few turns as possible. Every independent read belongs in the same `script` call: step 1, and every step that only opens more files, is one call, not one per step. Only a step whose next move depends on the result earns a turn of its own.";
++
++/** Build the block the model reads for one skill. */
++export function renderSkillBlock(skill: SkillMention): string {
++	return `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${SKILL_BATCHING_DIRECTIVE}\n\n${skill.body}\n</skill>`;
++}
++
++/**
++ * Expand every skill a message names into a skill block placed before the prose.
++ *
++ * Two spellings name a skill: `skill:name`, which autocomplete inserts, and `/name`, which people
++ * type. Both work anywhere in the message. A `/name` that leads the message yields to a built-in
++ * command, so `/model` still opens the model picker; a name that resolves to nothing, built-in or
++ * not, stays exactly as typed.
++ *
++ * @param resolve looks a name up; return undefined to leave the mention alone
++ * @param builtinCommandNames built-in slash command names, without the slash
++ */
++export function expandSkillMentions(
++	text: string,
++	resolve: (name: string) => SkillMention | undefined,
++	builtinCommandNames: ReadonlySet<string> = new Set(),
++): string {
++	if (!text.includes("skill:") && !text.includes("/")) return text;
++	const blocks: string[] = [];
++	// `/skill:name` is the spelling autocomplete and older docs use; treat it as `skill:name`.
++	const prose = text
++		.replace(/(^|\s)\/skill:/g, "$1skill:")
++		.replace(
++			/(^|\s)(skill:|\/)([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_-])/g,
++			(match, lead: string, prefix: string, name: string) => {
++				if (prefix === "/" && lead === "" && builtinCommandNames.has(name)) return match;
++				const skill = resolve(name);
++				if (!skill) return match;
++				blocks.push(renderSkillBlock(skill));
++				return lead;
++			},
++		)
++		.replace(/[ \t]{2,}/g, " ")
++		.trim();
++	if (blocks.length === 0) return text;
++	return prose ? `${blocks.join("\n\n")}\n\n${prose}` : blocks.join("\n\n");
++}
++
++/** A skill mention resolved from a file path, for callers that only know where the file is. */
++export function skillMentionFromFile(name: string, filePath: string, body: string): SkillMention {
++	return { name, filePath, baseDir: dirname(filePath), body };
++}
 diff --git a/packages/coding-agent/src/core/skills.ts b/packages/coding-agent/src/core/skills.ts
 index 48df453..a91a093 100644
 --- a/packages/coding-agent/src/core/skills.ts
@@ -2564,7 +2920,7 @@ index 48df453..a91a093 100644
  	return str
  		.replace(/&/g, "&amp;")
 diff --git a/packages/coding-agent/src/core/slash-commands.ts b/packages/coding-agent/src/core/slash-commands.ts
-index 97b2caa..465d2a3 100644
+index 97b2caa..55d7d2a 100644
 --- a/packages/coding-agent/src/core/slash-commands.ts
 +++ b/packages/coding-agent/src/core/slash-commands.ts
 @@ -25,7 +25,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
@@ -2576,6 +2932,15 @@ index 97b2caa..465d2a3 100644
  	{ name: "copy", description: "Copy last agent message to clipboard" },
  	{ name: "name", description: "Set session display name" },
  	{ name: "session", description: "Show session info and stats" },
+@@ -42,3 +42,8 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
+ 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, themes, and context files" },
+ 	{ name: "quit", description: `Quit ${APP_NAME}` },
+ ];
++
++/** Built-in command names, without the slash. A leading `/name` that is one of these is a command. */
++export const BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set(
++	BUILTIN_SLASH_COMMANDS.map((command) => command.name),
++);
 diff --git a/packages/coding-agent/src/core/system-prompt.ts b/packages/coding-agent/src/core/system-prompt.ts
 index e51e14f..156056d 100644
 --- a/packages/coding-agent/src/core/system-prompt.ts
@@ -7812,10 +8177,20 @@ index 0000000..90dc744
 +	return backgroundAnsi(RED_DEEP, theme.getColorMode());
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index 268a7fa..05f08cd 100644
+index 268a7fa..6f6331f 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-@@ -151,7 +151,8 @@ import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
+@@ -115,7 +115,8 @@ import {
+ 	type UsageEntry,
+ } from "../../core/session-manager.ts";
+ import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.ts";
+-import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
++import { BUILTIN_SLASH_COMMANDS, BUILTIN_COMMAND_NAMES } from "../../core/slash-commands.ts";
++import { expandSkillMentions as expandSkillMentionsInText, skillMentionFromFile } from "../../core/skill-mentions.ts";
+ import { getSourcePackageKey, type SourceInfo } from "../../core/source-info.ts";
+ import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
+ import { withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
+@@ -151,7 +152,8 @@ import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
  import { ExtensionEditorComponent } from "./components/extension-editor.ts";
  import { ExtensionInputComponent } from "./components/extension-input.ts";
  import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
@@ -7825,7 +8200,7 @@ index 268a7fa..05f08cd 100644
  import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
  import { LoginDialogComponent } from "./components/login-dialog.ts";
  import { createMarkdownTransform } from "./components/markdown-transform.ts";
-@@ -163,7 +164,7 @@ import {
+@@ -163,7 +165,7 @@ import {
  	formatAuthSelectorProviderType,
  	OAuthSelectorComponent,
  } from "./components/oauth-selector.ts";
@@ -7834,7 +8209,7 @@ index 268a7fa..05f08cd 100644
  import { createLoginMenuSelector } from "./components/radius-login-selector.ts";
  import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
  import { SessionSelectorComponent } from "./components/session-selector.ts";
-@@ -373,7 +374,7 @@ type LoginProviderCompletionOption = {
+@@ -373,7 +375,7 @@ type LoginProviderCompletionOption = {
  	subscription?: boolean;
  };
  
@@ -7843,7 +8218,7 @@ index 268a7fa..05f08cd 100644
  
  const AUTH_TYPE_ORDER = { oauth: 0, api_key: 1 } satisfies Record<AuthSelectorProvider["authType"], number>;
  
-@@ -481,6 +482,37 @@ export class InteractiveMode {
+@@ -481,6 +483,37 @@ export class InteractiveMode {
  	private activeSelectorToken?: object;
  	private activeSelectorDispose?: () => void;
  	private footer: FooterComponent;
@@ -7881,7 +8256,7 @@ index 268a7fa..05f08cd 100644
  	private footerContainer: Container;
  	private footerDataProvider: FooterDataProvider;
  	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
-@@ -560,6 +592,8 @@ export class InteractiveMode {
+@@ -560,6 +593,8 @@ export class InteractiveMode {
  	private shutdownRequested = false;
  
  	/** Reports working, blocked, done, and error states to terminals that support OSC 7501. */
@@ -7890,7 +8265,7 @@ index 268a7fa..05f08cd 100644
  	private readonly programStatus = new ProgramStatusReporter(
  		() => this.ui.terminal,
  		() => this.sessionManager.getSessionName(),
-@@ -1034,12 +1068,15 @@ export class InteractiveMode {
+@@ -1034,12 +1069,15 @@ export class InteractiveMode {
  			const showDetails = this.shouldShowStartupDetails();
  			// Built on demand so the header follows theme changes. The logo's first line carries the version,
  			// its second line the first line of key hints. Terminals that cannot render the logo get a
@@ -7911,7 +8286,7 @@ index 268a7fa..05f08cd 100644
  			};
  
  			// Build startup instructions using keybinding hint helpers
-@@ -1084,7 +1121,10 @@ export class InteractiveMode {
+@@ -1084,7 +1122,10 @@ export class InteractiveMode {
  					`Press ${keyText("app.tools.expand")} to show full startup help${showDetails ? " and loaded resources" : ""}.`,
  				);
  			const onboarding = () =>
@@ -7923,7 +8298,7 @@ index 268a7fa..05f08cd 100644
  			const header = new BuiltInHeader(
  				() => `${withLogo(compactInstructions())}\n${compactOnboarding()}\n\n${onboarding()}`,
  				() => `${withLogo(expandedInstructions())}\n\n${onboarding()}`,
-@@ -1171,7 +1211,7 @@ export class InteractiveMode {
+@@ -1171,7 +1212,7 @@ export class InteractiveMode {
  	async run(): Promise<void> {
  		await this.init();
  
@@ -7932,7 +8307,7 @@ index 268a7fa..05f08cd 100644
  			const controller = new AbortController();
  			const timeout = setTimeout(() => controller.abort(), 15_000);
  			void refreshModelCatalogs(this.session.modelRuntime, controller.signal)
-@@ -1196,7 +1236,7 @@ export class InteractiveMode {
+@@ -1196,7 +1237,7 @@ export class InteractiveMode {
  			})
  			.finally(() => {
  				// On Windows, npm can overwrite the shared console title while checking
@@ -7941,7 +8316,7 @@ index 268a7fa..05f08cd 100644
  				if (process.platform === "win32" && this.isInitialized) {
  					this.updateTerminalTitle();
  				}
-@@ -1286,7 +1326,7 @@ export class InteractiveMode {
+@@ -1286,7 +1327,7 @@ export class InteractiveMode {
  	}
  
  	private async checkForPackageUpdates(): Promise<string[]> {
@@ -7950,7 +8325,7 @@ index 268a7fa..05f08cd 100644
  			return [];
  		}
  
-@@ -1344,7 +1384,7 @@ export class InteractiveMode {
+@@ -1344,7 +1385,7 @@ export class InteractiveMode {
  		}
  
  		if (extendedKeysFormat === "xterm") {
@@ -7959,7 +8334,7 @@ index 268a7fa..05f08cd 100644
  		}
  
  		return undefined;
-@@ -1426,7 +1466,7 @@ export class InteractiveMode {
+@@ -1426,7 +1467,7 @@ export class InteractiveMode {
  			if (newEntries.length > 0) {
  				this.settingsManager.setExtensionChangelogVersion(key, pkg.version);
  				const name = pkg.name || sourceInfo.source;
@@ -7968,7 +8343,7 @@ index 268a7fa..05f08cd 100644
  				const markdown = newEntries
  					.map((entry) => entry.content.replace(/^##\s+/, `## ${name} `))
  					.join("\n\n")
-@@ -1453,24 +1493,11 @@ export class InteractiveMode {
+@@ -1453,24 +1494,11 @@ export class InteractiveMode {
  		}
  	}
  
@@ -7998,7 +8373,7 @@ index 268a7fa..05f08cd 100644
  
  	private getMarkdownThemeWithSettings(): MarkdownTheme {
  		return {
-@@ -2179,6 +2206,7 @@ export class InteractiveMode {
+@@ -2179,6 +2207,7 @@ export class InteractiveMode {
  		}
  		this.footer.setSession(this.session);
  		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
@@ -8006,7 +8381,7 @@ index 268a7fa..05f08cd 100644
  		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
  		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
  		this.outputPad = this.settingsManager.getOutputPad();
-@@ -3281,7 +3309,7 @@ export class InteractiveMode {
+@@ -3281,7 +3310,7 @@ export class InteractiveMode {
  
  	private setupEditorSubmitHandler(): void {
  		this.defaultEditor.onSubmit = async (text: string) => {
@@ -8015,7 +8390,7 @@ index 268a7fa..05f08cd 100644
  			if (!text) return;
  
  			// Handle commands
-@@ -3471,12 +3499,19 @@ export class InteractiveMode {
+@@ -3471,12 +3500,19 @@ export class InteractiveMode {
  			// First, move any pending bash components to chat
  			this.flushPendingBashComponents();
  
@@ -8035,7 +8410,7 @@ index 268a7fa..05f08cd 100644
  		};
  	}
  
-@@ -3581,6 +3616,7 @@ export class InteractiveMode {
+@@ -3581,6 +3617,7 @@ export class InteractiveMode {
  				break;
  
  			case "message_start":
@@ -8043,7 +8418,7 @@ index 268a7fa..05f08cd 100644
  				if (event.message.role === "custom") {
  					this.addMessageToChat(event.message);
  					this.ui.requestRender();
-@@ -3642,6 +3678,14 @@ export class InteractiveMode {
+@@ -3642,6 +3679,14 @@ export class InteractiveMode {
  
  			case "message_end":
  				if (event.message.role === "user") break;
@@ -8058,7 +8433,7 @@ index 268a7fa..05f08cd 100644
  				if (this.streamingComponent && event.message.role === "assistant") {
  					this.streamingMessage = event.message;
  					let errorMessage: string | undefined;
-@@ -3724,6 +3768,8 @@ export class InteractiveMode {
+@@ -3724,6 +3769,8 @@ export class InteractiveMode {
  
  			case "tool_execution_end": {
  				if (event.isError) this.maybeShowInstallChangeWarning();
@@ -8067,7 +8442,7 @@ index 268a7fa..05f08cd 100644
  				const component = this.pendingTools.get(event.toolCallId);
  				if (component) {
  					component.updateResult({ ...event.result, isError: event.isError, durationMs: event.durationMs });
-@@ -3734,6 +3780,8 @@ export class InteractiveMode {
+@@ -3734,6 +3781,8 @@ export class InteractiveMode {
  			}
  
  			case "agent_end":
@@ -8076,7 +8451,7 @@ index 268a7fa..05f08cd 100644
  				if (this.settingsManager.getShowTerminalProgress()) {
  					this.ui.terminal.setProgress(false);
  				}
-@@ -4365,7 +4413,7 @@ export class InteractiveMode {
+@@ -4365,7 +4414,7 @@ export class InteractiveMode {
  				() =>
  					theme.fg(
  						"warning",
@@ -8085,7 +8460,7 @@ index 268a7fa..05f08cd 100644
  					),
  				1,
  				0,
-@@ -4451,6 +4499,13 @@ export class InteractiveMode {
+@@ -4451,6 +4500,13 @@ export class InteractiveMode {
  		this.stop();
  		await this.runtimeHost.dispose();
  
@@ -8099,7 +8474,7 @@ index 268a7fa..05f08cd 100644
  		const resumeCommand = formatResumeCommand(this.sessionManager);
  		if (resumeCommand) {
  			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
-@@ -4768,13 +4823,8 @@ export class InteractiveMode {
+@@ -4768,13 +4824,8 @@ export class InteractiveMode {
  		const updateInstruction = () =>
  			theme.fg("muted", `New version ${release.version} is available. Run `) +
  			theme.fg("accent", `${APP_NAME} update`);
@@ -8115,7 +8490,7 @@ index 268a7fa..05f08cd 100644
  		const note = release.note?.trim();
  
  		this.chatContainer.addChild(new Spacer(1));
-@@ -4789,7 +4839,6 @@ export class InteractiveMode {
+@@ -4789,7 +4840,6 @@ export class InteractiveMode {
  			);
  			this.chatContainer.addChild(new Spacer(1));
  		}
@@ -8123,7 +8498,7 @@ index 268a7fa..05f08cd 100644
  		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
  		this.ui.requestRender();
  	}
-@@ -4898,6 +4947,39 @@ export class InteractiveMode {
+@@ -4898,6 +4948,24 @@ export class InteractiveMode {
  		this.showStatus("Queued message for after compaction");
  	}
  
@@ -8133,37 +8508,22 @@ index 268a7fa..05f08cd 100644
 +	 * Tags for skills that no longer exist are left as prose rather than silently dropped.
 +	 */
 +	private expandSkillMentions(text: string): string {
-+		if (!text.includes("skill:")) return text;
-+		const blocks: string[] = [];
-+		let changed = false;
-+		const prose = text
-+			.replace(/(^|\s)skill:([A-Za-z0-9._-]+)/g, (match, lead: string, name: string) => {
-+				const filePath = this.skillCommands.get(`skill:${name}`);
-+				if (!filePath) return match;
-+				try {
-+					const content = fs.readFileSync(filePath, "utf8").trim();
-+					// A skill is a procedure, and procedures are written one step at a time. Without
-+					// this line the model replayed each step as its own turn: nine discovery calls on
-+					// a restore that needed two. The steps do not change; the batching does.
-+					const batching =
-+						"Run this procedure in as few turns as possible. Every independent read belongs in the same `script` call: step 1, and every step that only opens more files, is one call, not one per step. Only a step whose next move depends on the result earns a turn of its own.";
-+					blocks.push(`<skill name="${name}" location="${filePath}">\n${batching}\n\n${content}\n</skill>`);
-+					changed = true;
-+					return lead;
-+				} catch {
-+					return match;
-+				}
-+			})
-+			.replace(/[ \t]{2,}/g, " ")
-+			.trim();
-+		if (!changed) return text;
-+		return prose ? `${blocks.join("\n\n")}\n\n${prose}` : blocks.join("\n\n");
++		return expandSkillMentionsInText(text, (name) => {
++			const filePath = this.skillCommands.get(`skill:${name}`);
++			if (!filePath) return undefined;
++			try {
++				const body = fs.readFileSync(filePath, "utf8").trim();
++				return skillMentionFromFile(name, filePath, body);
++			} catch {
++				return undefined;
++			}
++		}, BUILTIN_COMMAND_NAMES);
 +	}
 +
  	private isExtensionCommand(text: string): boolean {
  		if (!text.startsWith("/")) return false;
  
-@@ -7214,6 +7296,25 @@ export class InteractiveMode {
+@@ -7214,6 +7282,25 @@ export class InteractiveMode {
  	private async handleCompactCommand(customInstructions?: string): Promise<void> {
  		this.clearStatusIndicator();
  
@@ -8875,6 +9235,32 @@ index a09a3d0..1847eab 100644
  
  	try {
  		const latestRelease = await getLatestPiRelease(currentVersion);
+diff --git a/packages/coding-agent/test/client-identity.test.ts b/packages/coding-agent/test/client-identity.test.ts
+new file mode 100644
+index 0000000..0fc72fe
+--- /dev/null
++++ b/packages/coding-agent/test/client-identity.test.ts
+@@ -0,0 +1,20 @@
++import { describe, expect, it } from "vitest";
++import { getClientIdentity } from "../src/core/client-identity.ts";
++import { SETTINGS_DEFAULTS } from "../src/core/settings-defaults.ts";
++import type { SettingsManager } from "../src/core/settings-manager.ts";
++
++const settingsManager = { getEnableInstallTelemetry: () => true } as unknown as SettingsManager;
++
++describe("getClientIdentity", () => {
++	it("never attributes requests to another CLI agent, even with telemetry on", () => {
++		expect(getClientIdentity(settingsManager).attribution).toBeNull();
++	});
++
++	it("identifies itself by REEF's own version", () => {
++		expect(getClientIdentity(settingsManager).version).toMatch(/^\d+\.\d+\.\d+/);
++	});
++
++	it("ships with install telemetry off", () => {
++		expect(SETTINGS_DEFAULTS.enableInstallTelemetry).toBe(false);
++	});
++});
 diff --git a/packages/coding-agent/test/footer-width.test.ts b/packages/coding-agent/test/footer-width.test.ts
 index 12c074d..7c7976e 100644
 --- a/packages/coding-agent/test/footer-width.test.ts
@@ -8909,6 +9295,28 @@ index 12c074d..7c7976e 100644
  	});
  
  	it("marks Kimi Coding costs as subscription estimates", () => {
+diff --git a/packages/coding-agent/test/remote-catalog-provider.test.ts b/packages/coding-agent/test/remote-catalog-provider.test.ts
+index 03b7ebf..cfd4b52 100644
+--- a/packages/coding-agent/test/remote-catalog-provider.test.ts
++++ b/packages/coding-agent/test/remote-catalog-provider.test.ts
+@@ -318,7 +318,7 @@ describe("personalized catalog provider", () => {
+ 		const personalize: PersonalizeCatalog = async () => {
+ 			throw new Error("user models request failed");
+ 		};
+-		const provider = withPersonalizedCatalog(builtinProvider(), personalize);
++		const provider = withPersonalizedCatalog(builtinProvider(), personalize, "https://catalog.invalid");
+ 
+ 		await expect(refreshProvider(provider, store)).rejects.toThrow("user models request failed");
+ 		expect(provider.getModels().map((entry) => entry.id)).toEqual(["allowed"]);
+@@ -330,7 +330,7 @@ describe("personalized catalog provider", () => {
+ 			throw new Error("not used offline");
+ 		};
+ 		const store = new InMemoryModelsStore();
+-		const provider = withPersonalizedCatalog(builtinProvider(), personalize);
++		const provider = withPersonalizedCatalog(builtinProvider(), personalize, "https://catalog.invalid");
+ 
+ 		// pi versions before per-key lists stored the plain pi.dev catalog here, and saved an empty list
+ 		// after a missing pi.dev catalog or a failed first request. Only such an entry can be empty.
 diff --git a/packages/tui/src/autocomplete.ts b/packages/tui/src/autocomplete.ts
 index c652148..c14e4f1 100644
 --- a/packages/tui/src/autocomplete.ts
@@ -8952,10 +9360,94 @@ index c652148..c14e4f1 100644
  		if (!options.force && commandText.startsWith("/")) {
  			const spaceIndex = commandText.indexOf(" ");
 diff --git a/packages/tui/src/components/editor.ts b/packages/tui/src/components/editor.ts
-index 9fd3677..36e4787 100644
+index 9fd3677..2dfd782 100644
 --- a/packages/tui/src/components/editor.ts
 +++ b/packages/tui/src/components/editor.ts
-@@ -1237,9 +1237,14 @@ export class Editor implements Component, Focusable {
+@@ -10,6 +10,7 @@ import {
+ 	type TUI,
+ 	type TuiMouseEvent,
+ 	type TuiMouseEventResult,
++	type ComponentSelection,
+ } from "../tui.ts";
+ import { UndoStack } from "../undo-stack.ts";
+ import {
+@@ -315,6 +316,8 @@ export class Editor implements Component, Focusable {
+ 
+ 	// Store last render geometry for cursor navigation and mouse hit-testing.
+ 	private lastWidth: number = 80;
++	/** Horizontal padding used by the last render, so renderer cells map back to text columns. */
++	private lastPaddingX = 0;
+ 	private renderedVisibleLineCount = 1;
+ 	private renderedAutocompleteHeight = 0;
+ 
+@@ -534,6 +537,7 @@ export class Editor implements Component, Focusable {
+ 
+ 		// Store for cursor navigation (must match wrapping width)
+ 		this.lastWidth = layoutWidth;
++		this.lastPaddingX = paddingX;
+ 
+ 		// Layout the text
+ 		const layoutLines = this.layoutText(layoutWidth);
+@@ -635,6 +639,58 @@ export class Editor implements Component, Focusable {
+ 		return result;
+ 	}
+ 
++	/**
++	 * Delete the text under a selection the renderer owns (component-local cells, `end` exclusive).
++	 * One undo step. Returns false when the selection covers no text, so the key keeps its normal meaning.
++	 */
++	deleteSelection(selection: ComponentSelection): boolean {
++		const from = this.selectionCellToText(selection.start, false);
++		const to = this.selectionCellToText(selection.end, true);
++		if (!from || !to) return false;
++		const nonEmpty = from.line < to.line || (from.line === to.line && from.col < to.col);
++		if (!nonEmpty) return false;
++
++		this.pushUndoSnapshot();
++		this.exitHistoryBrowsing();
++		this.lastAction = null;
++		const head = (this.state.lines[from.line] ?? "").slice(0, from.col);
++		const tail = (this.state.lines[to.line] ?? "").slice(to.col);
++		this.state.lines.splice(from.line, to.line - from.line + 1, head + tail);
++		this.state.cursorLine = from.line;
++		this.setCursorCol(from.col);
++		if (this.autocompleteState) this.updateAutocomplete();
++		if (this.onChange) this.onChange(this.getText());
++		return true;
++	}
++
++	/** Map a component-local cell to a logical text position, using the same wrapping the render used. */
++	private selectionCellToText(
++		cell: { row: number; col: number },
++		isEnd: boolean,
++	): { line: number; col: number } | undefined {
++		const visualLines = this.buildVisualLineMap(this.lastWidth);
++		if (visualLines.length === 0) return undefined;
++		// Row 0 is the top border, so content rows run 1..renderedVisibleLineCount, as in handleMouse.
++		const row = Math.max(1, Math.min(this.renderedVisibleLineCount, cell.row));
++		const visual = visualLines[Math.max(0, Math.min(visualLines.length - 1, this.scrollOffset + row - 1))];
++		if (!visual) return undefined;
++		const logical = this.state.lines[visual.logicalLine] ?? "";
++		const chunk = logical.slice(visual.startCol, visual.startCol + visual.length);
++		const contentCol = Math.max(0, cell.col - this.lastPaddingX);
++		let column = 0;
++		let offset = chunk.length;
++		for (const grapheme of this.segment(chunk, "grapheme")) {
++			const width = visibleWidth(grapheme.segment);
++			// Start: include the grapheme under the cell. End: stop before the first grapheme starting at the cell.
++			if (isEnd ? column >= contentCol : column + width > contentCol) {
++				offset = grapheme.index;
++				break;
++			}
++			column += width;
++		}
++		return { line: visual.logicalLine, col: visual.startCol + offset };
++	}
++
+ 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+ 		const autocompleteStartRow = this.renderedVisibleLineCount + 2;
+ 		if (
+@@ -1237,9 +1293,14 @@ export class Editor implements Component, Focusable {
  
  		// Check if we should trigger or update autocomplete
  		if (!this.autocompleteState) {
@@ -8973,7 +9465,7 @@ index 9fd3677..36e4787 100644
  			}
  			// Auto-trigger for symbol-based completion like @, #, or provider triggers at token boundaries
  			else if (this.autocompleteTriggerCharacters.includes(char)) {
-@@ -1254,7 +1259,8 @@ export class Editor implements Component, Focusable {
+@@ -1254,7 +1315,8 @@ export class Editor implements Component, Focusable {
  				const currentLine = this.state.lines[this.state.cursorLine] || "";
  				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
  				// Check if we're in a slash command (with or without space for arguments)
@@ -8983,7 +9475,7 @@ index 9fd3677..36e4787 100644
  					this.tryTriggerAutocomplete();
  				}
  				// Check if we're in a symbol-based completion context like @, #, or provider triggers
-@@ -2213,6 +2219,11 @@ export class Editor implements Component, Focusable {
+@@ -2213,6 +2275,11 @@ export class Editor implements Component, Focusable {
  		return this.isSlashMenuAllowed() && textBeforeCursor.trimStart().startsWith("/");
  	}
  
@@ -8995,6 +9487,203 @@ index 9fd3677..36e4787 100644
  	// Autocomplete methods
  	/**
  	 * Find the best autocomplete item index for the given prefix.
+diff --git a/packages/tui/src/tui-alt-screen.ts b/packages/tui/src/tui-alt-screen.ts
+index 61d5b48..3af68f7 100644
+--- a/packages/tui/src/tui-alt-screen.ts
++++ b/packages/tui/src/tui-alt-screen.ts
+@@ -16,6 +16,8 @@ import {
+ 	type LayoutFrame,
+ 	renderLayoutFrame,
+ 	type ScrollbarGeometry,
++	type LayoutBox,
++	type LayoutRect,
+ } from "./layout.ts";
+ import { getLayoutNode } from "./layout-node.ts";
+ import type { Terminal } from "./terminal.ts";
+@@ -47,6 +49,7 @@ import {
+ 	type TuiStopOptions,
+ 	VIEWPORT_TUI,
+ 	type ViewportTUI,
++	type ComponentSelection,
+ } from "./tui.ts";
+ import {
+ 	extractAnsiCode,
+@@ -1450,6 +1453,55 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
+ 		return { start: Math.max(minColumn, start), end: Math.min(maxColumn, end) };
+ 	}
+ 
++	/**
++	 * The active selection in the focused component's own cells, but only when the whole selection
++	 * sits inside that component. A selection that starts in the transcript is not the input's to delete.
++	 */
++	protected override getActiveSelection(): ComponentSelection | undefined {
++		const focused = this.getFocusedComponent();
++		const selection = this.getSelectionBounds();
++		if (!focused || !selection || !this.currentLayout) return undefined;
++		const rect = this.getComponentRect(focused);
++		if (!rect) return undefined;
++		const inside = (point: SelectionPoint): boolean =>
++			point.row >= rect.y && point.row < rect.y + rect.height && point.col >= rect.x && point.col < rect.x + rect.width;
++		if (!inside(selection.start) || !inside(selection.end)) return undefined;
++		// Character selections include the cell under the end point; word and line selections already
++		// end on an exclusive boundary.
++		const endCol = selection.end.boundary ? selection.end.col : selection.end.col + 1;
++		return {
++			start: { row: selection.start.row - rect.y, col: selection.start.col - rect.x },
++			end: { row: selection.end.row - rect.y, col: endCol - rect.x },
++		};
++	}
++
++	/**
++	 * Where a component is on screen. Layout boxes only exist for components wrapped in a layout node,
++	 * so the editor usually sits inside a container box; descend from the deepest box that holds it,
++	 * stacking children the way `Container.render` does.
++	 */
++	private getComponentRect(target: Component): LayoutRect | undefined {
++		const layout = this.currentLayout;
++		if (!layout) return undefined;
++		if (this.layoutRoot) {
++			const anchor = findDeepestBoxHolding(layout.root, target);
++			const rect = anchor ? descendToComponent(anchor.component, target, anchor.rect) : undefined;
++			return rect;
++		}
++		// Without a layout root the visible document is this TUI's own children, stacked in order.
++		// Its box already carries the scroll offset, so the stack starts where the box starts.
++		const documentBox = findDeepestBoxHolding(layout.root, this.implicitDocument);
++		if (!documentBox) return undefined;
++		return descendThroughChildren(this.children, target, documentBox.rect);
++	}
++
++	protected override clearActiveSelection(): void {
++		this.selectionAnchor = undefined;
++		this.selectionFocus = undefined;
++		this.selectionGranularity = "character";
++		this.selectionInitialRange = undefined;
++	}
++
+ 	private getActiveSelectionText(): string | undefined {
+ 		const selection = this.getSelectionBounds();
+ 		if (!selection) return undefined;
+@@ -1798,3 +1850,42 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
+ 		this.currentLayout = nextLayout;
+ 	}
+ }
++
++/** True when `component` is `target` or renders it somewhere below itself. */
++function rendersTarget(component: Component, target: Component): boolean {
++	if (component === target) return true;
++	if (!(component instanceof Container)) return false;
++	return component.children.some((child) => rendersTarget(child, target));
++}
++
++/** The deepest layout box whose component renders `target`. */
++function findDeepestBoxHolding(box: LayoutBox, target: Component): LayoutBox | undefined {
++	if (!rendersTarget(box.component, target)) return undefined;
++	for (const child of box.children) {
++		const found = findDeepestBoxHolding(child, target);
++		if (found) return found;
++	}
++	return box;
++}
++
++/** Stack children vertically, as `Container.render` and `Container.handleMouse` do. */
++function descendThroughChildren(
++	children: readonly Component[],
++	target: Component,
++	rect: LayoutRect,
++): LayoutRect | undefined {
++	let y = rect.y;
++	for (const child of children) {
++		const height = child.render(rect.width).length;
++		const found = descendToComponent(child, target, { x: rect.x, y, width: rect.width, height });
++		if (found) return found;
++		y += height;
++	}
++	return undefined;
++}
++
++function descendToComponent(component: Component, target: Component, rect: LayoutRect): LayoutRect | undefined {
++	if (component === target) return rect;
++	if (!(component instanceof Container)) return undefined;
++	return descendThroughChildren(component.children, target, rect);
++}
+diff --git a/packages/tui/src/tui.ts b/packages/tui/src/tui.ts
+index fe0f2c7..ba2decc 100644
+--- a/packages/tui/src/tui.ts
++++ b/packages/tui/src/tui.ts
+@@ -114,6 +114,20 @@ export function retargetMouseEvent(event: TuiMouseEvent, target: TuiMouseDispatc
+ 	};
+ }
+ 
++/** Keys that remove the character(s) before or under the cursor. */
++function isDeleteKey(data: string): boolean {
++	return matchesKey(data, "backspace") || matchesKey(data, "delete");
++}
++
++/**
++ * A selection in a component's own cells, the convention `handleMouse` already uses: row 0 is the
++ * component's first row, column 0 its first column. `end` is exclusive.
++ */
++export interface ComponentSelection {
++	start: { row: number; col: number };
++	end: { row: number; col: number };
++}
++
+ export interface Component {
+ 	/**
+ 	 * Render the component to lines for the given viewport width
+@@ -128,6 +142,15 @@ export interface Component {
+ 	/** Optional normalized mouse handler. */
+ 	handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
+ 
++	/**
++	 * Delete the text under a selection the renderer owns. The renderer draws the highlight, so only
++	 * the renderer knows what is selected; the component knows what the text is. Returns true when
++	 * the component deleted something, so the renderer can clear its selection and skip the key.
++	 *
++	 * Coordinates follow `ComponentSelection`: component-local cells, `end` exclusive.
++	 */
++	deleteSelection?(selection: ComponentSelection): boolean;
++
+ 	/**
+ 	 * If true, component receives key release events (Kitty protocol).
+ 	 * Default is false - release events are filtered out.
+@@ -1041,6 +1064,17 @@ export abstract class TuiBase extends Container implements TUI {
+ 		process.nextTick(() => this.scheduleRender());
+ 	}
+ 
++	/**
++	 * The renderer's active text selection, in the focused component's own coordinates. The base
++	 * renderer has no selection; the alt screen does.
++	 */
++	protected getActiveSelection(): ComponentSelection | undefined {
++		return undefined;
++	}
++
++	/** Drop the renderer's selection after the focused component acted on it. */
++	protected clearActiveSelection(): void {}
++
+ 	private requestImmediateRender(): void {
+ 		this.cancelRenderTimer();
+ 		this.renderRequested = true;
+@@ -1155,6 +1189,17 @@ export abstract class TuiBase extends Container implements TUI {
+ 			if (isKeyRelease(data) && !this.focusedComponent.wantsKeyRelease) {
+ 				return;
+ 			}
++			// A renderer-owned selection beats the key: pressing delete with text highlighted removes
++			// the highlighted text, not one character. The component knows the text, the renderer
++			// knows the selection, so the renderer hands the range over and the component deletes it.
++			if (this.focusedComponent.deleteSelection && isDeleteKey(data)) {
++				const selection = this.getActiveSelection();
++				if (selection && this.focusedComponent.deleteSelection(selection)) {
++					this.clearActiveSelection();
++					this.requestImmediateRender();
++					return;
++				}
++			}
+ 			this.focusedComponent.handleInput(data);
+ 			// Keyboard input is latency-sensitive. Avoid the throttled timer path,
+ 			// where even setTimeout(0) can take a full 16 ms tick on Windows.
 diff --git a/packages/tui/test/autocomplete-skill-slash.test.ts b/packages/tui/test/autocomplete-skill-slash.test.ts
 index 737fa66..65ae5ce 100644
 --- a/packages/tui/test/autocomplete-skill-slash.test.ts
@@ -9055,5 +9744,142 @@ index 737fa66..65ae5ce 100644
 +			signal: new AbortController().signal,
 +		});
 +		assert.equal(result, null);
++	});
++});
+diff --git a/packages/tui/test/editor-selection-delete.test.ts b/packages/tui/test/editor-selection-delete.test.ts
+new file mode 100644
+index 0000000..c57356f
+--- /dev/null
++++ b/packages/tui/test/editor-selection-delete.test.ts
+@@ -0,0 +1,50 @@
++import assert from "node:assert";
++import { describe, it } from "node:test";
++import { Editor } from "../src/components/editor.ts";
++import { TuiMainScreen } from "../src/tui-main-screen.ts";
++import { defaultEditorTheme } from "./test-themes.ts";
++import { VirtualTerminal } from "./virtual-terminal.ts";
++
++function makeEditor(text: string): Editor {
++	const editor = new Editor(new TuiMainScreen(new VirtualTerminal(80, 24)), defaultEditorTheme);
++	editor.setText(text);
++	editor.render(80); // the render records wrapping width, padding, and visible rows
++	return editor;
++}
++
++// Content rows: row 0 is the top border, so the first text line is row 1.
++describe("Editor.deleteSelection", () => {
++	it("deletes a selection within one line, and nothing else", () => {
++		const editor = makeEditor("hello world");
++		// columns 6..11 cover "world"
++		assert.strictEqual(editor.deleteSelection({ start: { row: 1, col: 6 }, end: { row: 1, col: 11 } }), true);
++		assert.strictEqual(editor.getText(), "hello ");
++	});
++
++	it("deletes across lines and joins the remainders", () => {
++		const editor = makeEditor("alpha\nbeta\ngamma");
++		// from "alpha" column 3 through "beta" column 2 (exclusive end at col 2 of beta)
++		assert.strictEqual(editor.deleteSelection({ start: { row: 1, col: 3 }, end: { row: 2, col: 2 } }), true);
++		assert.strictEqual(editor.getText(), "alpta\ngamma");
++	});
++
++	it("does nothing and reports false for an empty selection", () => {
++		const editor = makeEditor("hello");
++		assert.strictEqual(editor.deleteSelection({ start: { row: 1, col: 2 }, end: { row: 1, col: 2 } }), false);
++		assert.strictEqual(editor.getText(), "hello");
++	});
++
++	it("is one undo step", () => {
++		const editor = makeEditor("hello world");
++		editor.deleteSelection({ start: { row: 1, col: 5 }, end: { row: 1, col: 11 } });
++		assert.strictEqual(editor.getText(), "hello");
++		editor.handleInput("\x1f"); // undo (ctrl+_)
++		assert.strictEqual(editor.getText(), "hello world");
++	});
++
++	it("keeps the cursor at the start of the deleted range", () => {
++		const editor = makeEditor("hello world");
++		editor.deleteSelection({ start: { row: 1, col: 6 }, end: { row: 1, col: 11 } });
++		assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 6 });
++	});
++});
+diff --git a/packages/tui/test/editor-selection-e2e.test.ts b/packages/tui/test/editor-selection-e2e.test.ts
+new file mode 100644
+index 0000000..26cf991
+--- /dev/null
++++ b/packages/tui/test/editor-selection-e2e.test.ts
+@@ -0,0 +1,75 @@
++import assert from "node:assert";
++import { describe, it } from "node:test";
++import { Editor } from "../src/components/editor.ts";
++import { Text } from "../src/components/text.ts";
++import { TuiAltScreen } from "../src/tui-alt-screen.ts";
++import { defaultEditorTheme } from "./test-themes.ts";
++import { VirtualTerminal } from "./virtual-terminal.ts";
++
++describe("selection delete through the alt screen", () => {
++	it("Backspace over a mouse-selected range deletes the range, not one character", async () => {
++		const terminal = new VirtualTerminal(40, 8);
++		const tui = new TuiAltScreen(terminal, undefined, undefined, { copyOnSelect: false });
++		const editor = new Editor(tui, defaultEditorTheme);
++		editor.setText("hello world");
++		tui.addChild(editor);
++		tui.setFocus(editor);
++		tui.start();
++		await new Promise((resolve) => setTimeout(resolve, 20));
++
++		// Drag across "world" (text columns 6..10 on the first text row, screen row 1).
++		terminal.sendInput("\x1b[<0;7;2M"); // press at column 6
++		terminal.sendInput("\x1b[<32;11;2M"); // drag to column 10 (inclusive)
++		terminal.sendInput("\x1b[<3;11;2m"); // release
++		await new Promise((resolve) => setTimeout(resolve, 20));
++
++		terminal.sendInput("\x7f"); // Backspace
++		await new Promise((resolve) => setTimeout(resolve, 20));
++		assert.strictEqual(editor.getText(), "hello ");
++		tui.stop();
++	});
++
++	it("deletes a range dragged right-to-left over the input", async () => {
++		const terminal = new VirtualTerminal(40, 8);
++		const tui = new TuiAltScreen(terminal, undefined, undefined, { copyOnSelect: false });
++		const editor = new Editor(tui, defaultEditorTheme);
++		editor.setText("hello world");
++		tui.addChild(editor);
++		tui.setFocus(editor);
++		tui.start();
++		await new Promise((resolve) => setTimeout(resolve, 20));
++
++		terminal.sendInput("\x1b[<0;11;2M"); // press on the last column of "world"
++		terminal.sendInput("\x1b[<32;7;2M"); // drag left onto its first column
++		terminal.sendInput("\x1b[<3;7;2m");
++		await new Promise((resolve) => setTimeout(resolve, 20));
++
++		terminal.sendInput("\x7f");
++		await new Promise((resolve) => setTimeout(resolve, 20));
++		assert.strictEqual(editor.getText(), "hello ");
++		tui.stop();
++	});
++
++	it("leaves a transcript selection to the transcript, not to the input", async () => {
++		const terminal = new VirtualTerminal(40, 8);
++		const tui = new TuiAltScreen(terminal, undefined, undefined, { copyOnSelect: false });
++		tui.addChild(new Text("transcript output here", 0, 0));
++		const editor = new Editor(tui, defaultEditorTheme);
++		editor.setText("ab");
++		tui.addChild(editor);
++		tui.setFocus(editor);
++		tui.start();
++		await new Promise((resolve) => setTimeout(resolve, 20));
++
++		terminal.sendInput("\x1b[<0;1;1M"); // press on the transcript, not the input
++		terminal.sendInput("\x1b[<32;10;1M");
++		terminal.sendInput("\x1b[<3;10;1m");
++		await new Promise((resolve) => setTimeout(resolve, 20));
++
++		terminal.sendInput("\x7f");
++		await new Promise((resolve) => setTimeout(resolve, 20));
++		// The input keeps its normal single-character Backspace; the transcript selection is not its text.
++		assert.strictEqual(editor.getText(), "a");
++		tui.stop();
 +	});
 +});

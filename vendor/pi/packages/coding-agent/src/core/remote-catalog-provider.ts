@@ -11,7 +11,6 @@ import { VERSION } from "../config.ts";
 import { fetchWithRetry } from "../utils/management-http.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 
-const DEFAULT_CATALOG_BASE_URL = "https://pi.dev";
 const REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS = 4_000;
 export const REMOTE_CATALOG_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
 /**
@@ -103,7 +102,7 @@ export type PersonalizeCatalog = (
 /** Add a persisted pi.dev catalog overlay to a static built-in provider. */
 export function withRemoteCatalog(
 	provider: Provider,
-	catalogBaseUrl: string = DEFAULT_CATALOG_BASE_URL,
+	catalogBaseUrl: string,
 	localGeneratedAt?: number,
 ): Provider {
 	let dynamicModels: readonly AnyModel[] = [];
@@ -195,7 +194,7 @@ export function withRemoteCatalog(
 export function withPersonalizedCatalog(
 	provider: Provider,
 	personalize: PersonalizeCatalog,
-	catalogBaseUrl: string = DEFAULT_CATALOG_BASE_URL,
+	catalogBaseUrl: string,
 	localGeneratedAt?: number,
 ): Provider {
 	let personalModels: readonly AnyModel[] = [];

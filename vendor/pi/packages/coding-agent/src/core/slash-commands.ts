@@ -42,3 +42,8 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, themes, and context files" },
 	{ name: "quit", description: `Quit ${APP_NAME}` },
 ];
+
+/** Built-in command names, without the slash. A leading `/name` that is one of these is a command. */
+export const BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set(
+	BUILTIN_SLASH_COMMANDS.map((command) => command.name),
+);
