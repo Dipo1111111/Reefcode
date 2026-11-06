@@ -13,7 +13,9 @@ describe("discovery guidance", () => {
 			[{ name: "read", description: "Read a file.", parameters: { type: "object", properties: {} } } as never],
 			{ compact: true },
 		);
-		expect(text).toContain("listed below with its arguments");
+		expect(text).toContain("Every callable tool is listed below");
 		expect(text).toContain("Plan the whole sequence before the first call");
+		// A model that cannot see a tool it wants used to shell out to the harness looking for one.
+		expect(text).toContain("never run `reef help`");
 	});
 });

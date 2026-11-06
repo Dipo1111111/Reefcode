@@ -3509,7 +3509,9 @@ export class InteractiveMode {
 				this.pendingUserInputs.push(text);
 			}
 			this.editor.addToHistory?.(text);
-			this.ui.requestRender();
+			// Force a repaint rather than a diff: a cell left from the frame before the box emptied
+			// stays on screen forever when the next frame happens to match it.
+			this.ui.requestRender(true);
 		};
 	}
 
@@ -4960,7 +4962,12 @@ export class InteractiveMode {
 				if (!filePath) return match;
 				try {
 					const content = fs.readFileSync(filePath, "utf8").trim();
-					blocks.push(`<skill name="${name}" location="${filePath}">\n${content}\n</skill>`);
+					// A skill is a procedure, and procedures are written one step at a time. Without
+					// this line the model replayed each step as its own turn: nine discovery calls on
+					// a restore that needed two. The steps do not change; the batching does.
+					const batching =
+						"Run this procedure in as few turns as possible. Every independent read belongs in the same `script` call: step 1, and every step that only opens more files, is one call, not one per step. Only a step whose next move depends on the result earns a turn of its own.";
+					blocks.push(`<skill name="${name}" location="${filePath}">\n${batching}\n\n${content}\n</skill>`);
 					changed = true;
 					return lead;
 				} catch {

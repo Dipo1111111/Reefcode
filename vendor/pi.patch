@@ -1729,10 +1729,32 @@ index a0dda03..7eecafc 100644
  				executeTool: (callerId, name, args, options) => this._executeNestedToolCall(callerId, name, args, options),
  				getCallableTools: () => this._getCallableTools(),
  			},
+diff --git a/packages/coding-agent/src/core/bash-executor.ts b/packages/coding-agent/src/core/bash-executor.ts
+index 9745ff2..daa67e9 100644
+--- a/packages/coding-agent/src/core/bash-executor.ts
++++ b/packages/coding-agent/src/core/bash-executor.ts
+@@ -64,7 +64,7 @@ export async function executeBashWithOperations(
+ 		if (tempFilePath) {
+ 			return;
+ 		}
+-		({ path: tempFilePath, stream: tempFileStream } = createOutputFileStream("pi-bash", ".log"));
++		({ path: tempFilePath, stream: tempFileStream } = createOutputFileStream("reef-bash", ".log"));
+ 		for (const chunk of outputChunks) {
+ 			tempFileStream.write(chunk);
+ 		}
 diff --git a/packages/coding-agent/src/core/bug-report.ts b/packages/coding-agent/src/core/bug-report.ts
-index efdeb5e..abcd361 100644
+index efdeb5e..f3a365f 100644
 --- a/packages/coding-agent/src/core/bug-report.ts
 +++ b/packages/coding-agent/src/core/bug-report.ts
+@@ -14,7 +14,7 @@ import type { ModelRuntime } from "./model-runtime.ts";
+ import type { ReadonlySessionManager } from "./session-manager.ts";
+ import type { Settings } from "./settings-manager.ts";
+ 
+-export const BUG_REPORT_CUSTOM_ENTRY_TYPE = "pi.bug-report";
++export const BUG_REPORT_CUSTOM_ENTRY_TYPE = "reef.bug-report";
+ const BUG_REPORT_SCHEMA_VERSION = 1;
+ const REDACTED = "<redacted>";
+ const SENSITIVE_KEY = /(?:^|[-_])(api[-_]?key|secret|token|password|passwd|credential|authorization|cookie)(?:$|[-_])/i;
 @@ -279,7 +279,7 @@ export function bugReportArchiveFileName(id: string): string {
  	return `pi-bug-report-${id}.zip`;
  }
@@ -2541,6 +2563,19 @@ index 48df453..a91a093 100644
  function escapeXml(str: string): string {
  	return str
  		.replace(/&/g, "&amp;")
+diff --git a/packages/coding-agent/src/core/slash-commands.ts b/packages/coding-agent/src/core/slash-commands.ts
+index 97b2caa..465d2a3 100644
+--- a/packages/coding-agent/src/core/slash-commands.ts
++++ b/packages/coding-agent/src/core/slash-commands.ts
+@@ -25,7 +25,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
+ 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
+ 	{ name: "import", description: "Import a JSONL session, preserving its ID and working directory" },
+ 	{ name: "share", description: "Share session via a Radius artifact or a GitHub gist" },
+-	{ name: "bug", description: "Report a bug to the Pi developers", argumentHint: "<description>" },
++	{ name: "bug", description: "Report a bug to the REEF maintainers", argumentHint: "<description>" },
+ 	{ name: "copy", description: "Copy last agent message to clipboard" },
+ 	{ name: "name", description: "Set session display name" },
+ 	{ name: "session", description: "Show session info and stats" },
 diff --git a/packages/coding-agent/src/core/system-prompt.ts b/packages/coding-agent/src/core/system-prompt.ts
 index e51e14f..156056d 100644
 --- a/packages/coding-agent/src/core/system-prompt.ts
@@ -2802,7 +2837,7 @@ index 0000000..64360fa
 +	return join(".reef", "artifacts", name);
 +}
 diff --git a/packages/coding-agent/src/core/tools/bash.ts b/packages/coding-agent/src/core/tools/bash.ts
-index 2084d6f..4cd56b1 100644
+index 2084d6f..94a82cc 100644
 --- a/packages/coding-agent/src/core/tools/bash.ts
 +++ b/packages/coding-agent/src/core/tools/bash.ts
 @@ -16,6 +16,7 @@ import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
@@ -2890,6 +2925,15 @@ index 2084d6f..4cd56b1 100644
  						: {}),
  					exit_code: exitCode,
  					wall_time_seconds: wallTimeSeconds,
+@@ -420,7 +432,7 @@ const bashToolConfig: ShellToolConfig = {
+ 	prompt: "$",
+ 	promptSnippet: bashToolSystemPromptContribution.snippet,
+ 	promptGuidelines: bashToolSystemPromptContribution.guidelines,
+-	tempFilePrefix: "pi-bash",
++	tempFilePrefix: "reef-bash",
+ };
+ 
+ export function createBashToolDefinition(
 diff --git a/packages/coding-agent/src/core/tools/edit.ts b/packages/coding-agent/src/core/tools/edit.ts
 index bb6aeff..31b2042 100644
 --- a/packages/coding-agent/src/core/tools/edit.ts
@@ -2916,6 +2960,32 @@ index bb6aeff..31b2042 100644
  	const legacy = args as LegacyEditToolInput;
  	if (typeof legacy.oldText !== "string" || typeof legacy.newText !== "string") {
  		return args as EditToolInput;
+diff --git a/packages/coding-agent/src/core/tools/output-accumulator.ts b/packages/coding-agent/src/core/tools/output-accumulator.ts
+index a2868a8..d966ec4 100644
+--- a/packages/coding-agent/src/core/tools/output-accumulator.ts
++++ b/packages/coding-agent/src/core/tools/output-accumulator.ts
+@@ -58,7 +58,7 @@ export class OutputAccumulator {
+ 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
+ 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+ 		this.maxRollingBytes = Math.max(this.maxBytes * 2, 1);
+-		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
++		this.tempFilePrefix = options.tempFilePrefix ?? "reef-output";
+ 	}
+ 
+ 	append(data: Buffer): void {
+diff --git a/packages/coding-agent/src/core/tools/powershell.ts b/packages/coding-agent/src/core/tools/powershell.ts
+index ac8a491..1ec2e50 100644
+--- a/packages/coding-agent/src/core/tools/powershell.ts
++++ b/packages/coding-agent/src/core/tools/powershell.ts
+@@ -43,7 +43,7 @@ const powershellToolConfig: ShellToolConfig = {
+ 	prompt: "PS>",
+ 	promptSnippet: powershellToolSystemPromptContribution.snippet,
+ 	promptGuidelines: powershellToolSystemPromptContribution.guidelines,
+-	tempFilePrefix: "pi-powershell",
++	tempFilePrefix: "reef-powershell",
+ };
+ 
+ export function createPowerShellToolDefinition(
 diff --git a/packages/coding-agent/src/core/tools/read.ts b/packages/coding-agent/src/core/tools/read.ts
 index 8fb93a6..de1a344 100644
 --- a/packages/coding-agent/src/core/tools/read.ts
@@ -3059,10 +3129,10 @@ index 0000000..a67b6b8
 +});
 diff --git a/packages/coding-agent/src/extensions/codemode/discovery.test.ts b/packages/coding-agent/src/extensions/codemode/discovery.test.ts
 new file mode 100644
-index 0000000..7b49834
+index 0000000..0b931a9
 --- /dev/null
 +++ b/packages/coding-agent/src/extensions/codemode/discovery.test.ts
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,21 @@
 +import { describe, expect, it } from "vitest";
 +import { createCodemodeDescription } from "./tool.ts";
 +
@@ -3078,8 +3148,10 @@ index 0000000..7b49834
 +			[{ name: "read", description: "Read a file.", parameters: { type: "object", properties: {} } } as never],
 +			{ compact: true },
 +		);
-+		expect(text).toContain("listed below with its arguments");
++		expect(text).toContain("Every callable tool is listed below");
 +		expect(text).toContain("Plan the whole sequence before the first call");
++		// A model that cannot see a tool it wants used to shell out to the harness looking for one.
++		expect(text).toContain("never run `reef help`");
 +	});
 +});
 diff --git a/packages/coding-agent/src/extensions/codemode/execute.ts b/packages/coding-agent/src/extensions/codemode/execute.ts
@@ -3519,7 +3591,7 @@ index 0000000..4bed545
 +	});
 +});
 diff --git a/packages/coding-agent/src/extensions/codemode/tool.ts b/packages/coding-agent/src/extensions/codemode/tool.ts
-index 648ba61..b5b08df 100644
+index 648ba61..840affa 100644
 --- a/packages/coding-agent/src/extensions/codemode/tool.ts
 +++ b/packages/coding-agent/src/extensions/codemode/tool.ts
 @@ -33,10 +33,13 @@ import type { ModelRegistry } from "../../core/model-registry.ts";
@@ -3566,7 +3638,7 @@ index 648ba61..b5b08df 100644
  	}),
  });
  
-@@ -105,27 +115,63 @@ export interface CodemodeToolDetails {
+@@ -105,27 +115,64 @@ export interface CodemodeToolDetails {
  	fullOutputPath?: string;
  }
  
@@ -3619,7 +3691,8 @@ index 648ba61..b5b08df 100644
 +- A script earns its turn by doing several calls. Batch independent ones with \`Promise.allSettled\`; loop when the data decides the next call. **A script with one call costs more than calling the tool once** — measured at +40% tokens on small tasks — so do it directly instead.
 +- First line, optional: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\` (\`// @script:\` is an alias). \`startInBackground\` continues the script after the tool returns.
 +- Long input text (a file body, a patch, a heredoc) goes in an input block instead of inside the code: \`// @input: patch <<'EOF'\` then the text, then a line with only \`EOF\`. Read it as \`inputs.patch\`. Blocks must be closed and are removed before the script runs.
-+- Every tool you have is listed below with its arguments. Plan the whole sequence before the first call: a turn re-sends the prompt, so dependent steps belong in one script.
++- Only \`script\` is declared: that is the design. Every callable tool is listed below; never run \`reef help\` or read the bundle to find them.
++- Plan the whole sequence before the first call; one command per script wastes a turn.
 +- A new deliverable needs no inspection first. \`write\` creates its folders and reports the size, so write the file and read the result instead of listing the directory to see what exists.
 +- Create files with \`tools.write\`, change them with \`tools.edit\` — not shell redirection or \`sed -i\`.
 +- A call's own result is its verification: do not re-read a file you just wrote, or re-measure what a tool just reported.`;
@@ -3637,7 +3710,7 @@ index 648ba61..b5b08df 100644
  	];
  	if (models) {
  		lines.push(`- \`models\`: classifiers and image generation. Read ${CODEMODE_DOCS_PATH} first.`);
-@@ -161,6 +207,13 @@ export function getCodemodeCallableTools(tools: readonly AgentTool<any>[]): Agen
+@@ -161,6 +208,13 @@ export function getCodemodeCallableTools(tools: readonly AgentTool<any>[]): Agen
  }
  
  export interface CodemodeDescriptionOptions {
@@ -3651,7 +3724,7 @@ index 648ba61..b5b08df 100644
  	/** Declare the `models` namespace; only for tools created with model access. */
  	models?: boolean;
  	/** Namespace of each tool, by tool name. Tools of one namespace are listed under one heading. */
-@@ -183,6 +236,14 @@ function renderToolSection(declaration: Omit<CodemodeTool, "execute">): string {
+@@ -183,6 +237,14 @@ function renderToolSection(declaration: Omit<CodemodeTool, "execute">): string {
  	return `${heading}\n${renderToolSample(declaration).trim()}`;
  }
  
@@ -3666,7 +3739,7 @@ index 648ba61..b5b08df 100644
  interface CatalogEntry {
  	name: string;
  	section: string;
-@@ -238,7 +299,7 @@ export function createCodemodeDescription(
+@@ -238,7 +300,7 @@ export function createCodemodeDescription(
  		const key = namespace ? `ns:${namespace.name}` : "";
  		const group = groups.get(key) ?? { namespace, entries: [] };
  		groups.set(key, group);
@@ -3675,7 +3748,7 @@ index 648ba61..b5b08df 100644
  		group.entries.push({ name: declaration.name, section, cost: Math.ceil(section.length / CHARS_PER_TOKEN) });
  	}
  	const ordered = [...groups.values()].sort((a, b) =>
-@@ -249,6 +310,17 @@ export function createCodemodeDescription(
+@@ -249,6 +311,17 @@ export function createCodemodeDescription(
  	const sections = [DESCRIPTION_INTRO, describeGlobals(options.models === true)];
  	if (declarations.length === 0) return sections.join("\n\n");
  
@@ -3693,7 +3766,7 @@ index 648ba61..b5b08df 100644
  	const toolSections = ["Nested tools:"];
  	for (const { namespace, entries } of ordered) {
  		const visible = entries.filter((entry) => shown.has(entry.name));
-@@ -285,13 +357,28 @@ function describeFields(schema: unknown, depth: number): string | undefined {
+@@ -285,13 +358,28 @@ function describeFields(schema: unknown, depth: number): string | undefined {
  			constValue !== undefined
  				? JSON.stringify(constValue)
  				: depth > 0
@@ -3723,7 +3796,7 @@ index 648ba61..b5b08df 100644
  /**
   * What a script call resolves to, in one line: `a string`, the field names of an object (see
   * {@link describeFields}), the field names of each object in a union, the rendered type when it
-@@ -340,7 +427,10 @@ function describeScriptCall(tool: AgentTool<any>): string {
+@@ -340,7 +428,10 @@ function describeScriptCall(tool: AgentTool<any>): string {
   * Listing by exposure, not by the active set, keeps the codemode description unchanged when
   * `tool_search` loads a tool, so loads do not redeclare codemode.
   */
@@ -3735,7 +3808,7 @@ index 648ba61..b5b08df 100644
  	const mode = options.getMode?.() ?? SETTINGS_DEFAULTS.codemode.mode;
  	const isDirect = (tool: AgentTool) => loadout.getExposure(tool.name) === "direct";
  	const callable = getCodemodeCallableTools(loadout.callable);
-@@ -351,7 +441,14 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+@@ -351,7 +442,14 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
  			if (callableNames.has(tool.name)) descriptions[tool.name] = describeScriptCall(tool);
  		}
  	}
@@ -3751,7 +3824,7 @@ index 648ba61..b5b08df 100644
  	const namespaces = new Map(
  		listed.flatMap((tool) => {
  			const namespace = loadout.getNamespace(tool.name);
-@@ -360,6 +457,7 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+@@ -360,6 +458,7 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
  	);
  	const guidelines = new Map(listed.map((tool) => [tool.name, loadout.getPromptGuidelines(tool.name)] as const));
  	descriptions[CODEMODE_TOOL_NAME] = createCodemodeDescription(listed, {
@@ -3759,7 +3832,7 @@ index 648ba61..b5b08df 100644
  		models: options.models === true,
  		namespaces,
  		guidelines,
-@@ -369,13 +467,21 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
+@@ -369,13 +468,21 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
  		inlineBudget: options.getInlineBudget?.() ?? DEFAULT_CODEMODE_INLINE_BUDGET,
  	});
  	const declaredNames = new Set(loadout.declared.map((tool) => tool.name));
@@ -3788,7 +3861,7 @@ index 648ba61..b5b08df 100644
  }
  
  /** Script globals that list or look up tools and namespaces, which the script may then call by any name. */
-@@ -391,6 +497,33 @@ function getScriptReach(code: unknown): "all" | readonly string[] {
+@@ -391,6 +498,33 @@ function getScriptReach(code: unknown): "all" | readonly string[] {
  	return DISCOVERY_GLOBALS.test(code) ? "all" : (code.match(/\w+/g) ?? []);
  }
  
@@ -3822,7 +3895,7 @@ index 648ba61..b5b08df 100644
  export function createCodemodeToolDefinition(
  	options: CodemodeToolOptions = {},
  ): ToolDefinition<typeof codemodeSchema, CodemodeToolDetails | undefined> {
-@@ -404,13 +537,63 @@ export function createCodemodeToolDefinition(
+@@ -404,13 +538,63 @@ export function createCodemodeToolDefinition(
  		parameters: codemodeSchema,
  		// Scripts must not start other scripts.
  		exposure: "model-only",
@@ -7739,7 +7812,7 @@ index 0000000..90dc744
 +	return backgroundAnsi(RED_DEEP, theme.getColorMode());
 +}
 diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
-index 268a7fa..f4ead1f 100644
+index 268a7fa..05f08cd 100644
 --- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 +++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
 @@ -151,7 +151,8 @@ import { playArmin3d, playPiLogo3d } from "./components/easter-egg-3d.lazy.ts";
@@ -7942,7 +8015,7 @@ index 268a7fa..f4ead1f 100644
  			if (!text) return;
  
  			// Handle commands
-@@ -3471,12 +3499,17 @@ export class InteractiveMode {
+@@ -3471,12 +3499,19 @@ export class InteractiveMode {
  			// First, move any pending bash components to chat
  			this.flushPendingBashComponents();
  
@@ -7956,11 +8029,13 @@ index 268a7fa..f4ead1f 100644
  				this.pendingUserInputs.push(text);
  			}
  			this.editor.addToHistory?.(text);
-+			this.ui.requestRender();
++			// Force a repaint rather than a diff: a cell left from the frame before the box emptied
++			// stays on screen forever when the next frame happens to match it.
++			this.ui.requestRender(true);
  		};
  	}
  
-@@ -3581,6 +3614,7 @@ export class InteractiveMode {
+@@ -3581,6 +3616,7 @@ export class InteractiveMode {
  				break;
  
  			case "message_start":
@@ -7968,7 +8043,7 @@ index 268a7fa..f4ead1f 100644
  				if (event.message.role === "custom") {
  					this.addMessageToChat(event.message);
  					this.ui.requestRender();
-@@ -3642,6 +3676,14 @@ export class InteractiveMode {
+@@ -3642,6 +3678,14 @@ export class InteractiveMode {
  
  			case "message_end":
  				if (event.message.role === "user") break;
@@ -7983,7 +8058,7 @@ index 268a7fa..f4ead1f 100644
  				if (this.streamingComponent && event.message.role === "assistant") {
  					this.streamingMessage = event.message;
  					let errorMessage: string | undefined;
-@@ -3724,6 +3766,8 @@ export class InteractiveMode {
+@@ -3724,6 +3768,8 @@ export class InteractiveMode {
  
  			case "tool_execution_end": {
  				if (event.isError) this.maybeShowInstallChangeWarning();
@@ -7992,7 +8067,7 @@ index 268a7fa..f4ead1f 100644
  				const component = this.pendingTools.get(event.toolCallId);
  				if (component) {
  					component.updateResult({ ...event.result, isError: event.isError, durationMs: event.durationMs });
-@@ -3734,6 +3778,8 @@ export class InteractiveMode {
+@@ -3734,6 +3780,8 @@ export class InteractiveMode {
  			}
  
  			case "agent_end":
@@ -8001,7 +8076,7 @@ index 268a7fa..f4ead1f 100644
  				if (this.settingsManager.getShowTerminalProgress()) {
  					this.ui.terminal.setProgress(false);
  				}
-@@ -4365,7 +4411,7 @@ export class InteractiveMode {
+@@ -4365,7 +4413,7 @@ export class InteractiveMode {
  				() =>
  					theme.fg(
  						"warning",
@@ -8010,7 +8085,7 @@ index 268a7fa..f4ead1f 100644
  					),
  				1,
  				0,
-@@ -4451,6 +4497,13 @@ export class InteractiveMode {
+@@ -4451,6 +4499,13 @@ export class InteractiveMode {
  		this.stop();
  		await this.runtimeHost.dispose();
  
@@ -8024,7 +8099,7 @@ index 268a7fa..f4ead1f 100644
  		const resumeCommand = formatResumeCommand(this.sessionManager);
  		if (resumeCommand) {
  			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
-@@ -4768,13 +4821,8 @@ export class InteractiveMode {
+@@ -4768,13 +4823,8 @@ export class InteractiveMode {
  		const updateInstruction = () =>
  			theme.fg("muted", `New version ${release.version} is available. Run `) +
  			theme.fg("accent", `${APP_NAME} update`);
@@ -8040,7 +8115,7 @@ index 268a7fa..f4ead1f 100644
  		const note = release.note?.trim();
  
  		this.chatContainer.addChild(new Spacer(1));
-@@ -4789,7 +4837,6 @@ export class InteractiveMode {
+@@ -4789,7 +4839,6 @@ export class InteractiveMode {
  			);
  			this.chatContainer.addChild(new Spacer(1));
  		}
@@ -8048,7 +8123,7 @@ index 268a7fa..f4ead1f 100644
  		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
  		this.ui.requestRender();
  	}
-@@ -4898,6 +4945,34 @@ export class InteractiveMode {
+@@ -4898,6 +4947,39 @@ export class InteractiveMode {
  		this.showStatus("Queued message for after compaction");
  	}
  
@@ -8067,7 +8142,12 @@ index 268a7fa..f4ead1f 100644
 +				if (!filePath) return match;
 +				try {
 +					const content = fs.readFileSync(filePath, "utf8").trim();
-+					blocks.push(`<skill name="${name}" location="${filePath}">\n${content}\n</skill>`);
++					// A skill is a procedure, and procedures are written one step at a time. Without
++					// this line the model replayed each step as its own turn: nine discovery calls on
++					// a restore that needed two. The steps do not change; the batching does.
++					const batching =
++						"Run this procedure in as few turns as possible. Every independent read belongs in the same `script` call: step 1, and every step that only opens more files, is one call, not one per step. Only a step whose next move depends on the result earns a turn of its own.";
++					blocks.push(`<skill name="${name}" location="${filePath}">\n${batching}\n\n${content}\n</skill>`);
 +					changed = true;
 +					return lead;
 +				} catch {
@@ -8083,7 +8163,7 @@ index 268a7fa..f4ead1f 100644
  	private isExtensionCommand(text: string): boolean {
  		if (!text.startsWith("/")) return false;
  
-@@ -7214,6 +7289,25 @@ export class InteractiveMode {
+@@ -7214,6 +7296,25 @@ export class InteractiveMode {
  	private async handleCompactCommand(customInstructions?: string): Promise<void> {
  		this.clearStatusIndicator();
  
@@ -8606,7 +8686,7 @@ index 7fc7151..622e2f6 100644
  // RPC Commands (stdin)
  // ============================================================================
 diff --git a/packages/coding-agent/src/package-manager-cli.ts b/packages/coding-agent/src/package-manager-cli.ts
-index 93a8fd4..640a2a9 100644
+index 93a8fd4..6481494 100644
 --- a/packages/coding-agent/src/package-manager-cli.ts
 +++ b/packages/coding-agent/src/package-manager-cli.ts
 @@ -56,7 +56,7 @@ const MANAGED_INSTALL_MARKER = "managed-install.json";
@@ -8627,6 +8707,47 @@ index 93a8fd4..640a2a9 100644
  			/\/+$/,
  			"",
  		);
+@@ -296,7 +296,7 @@ function getPackageCommandUsage(command: PackageCommand): string {
+ 		case "remove":
+ 			return `${APP_NAME} remove <source> [-l] [--approve|--no-approve]`;
+ 		case "update":
+-			return `${APP_NAME} update [source|self|pi] [--self|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force]`;
++			return `${APP_NAME} update [source|self] [--self|--extensions|--models|--all] [--extension <source>] [--approve|--no-approve] [--force]`;
+ 		case "list":
+ 			return `${APP_NAME} list [--approve|--no-approve]`;
+ 	}
+@@ -364,24 +364,24 @@ Examples:
+ 			console.log(`${chalk.bold("Usage:")}
+   ${getPackageCommandUsage("update")}
+ 
+-Update pi, installed packages, or model catalogs.
++Update ${APP_NAME}, installed packages, or model catalogs.
+ 
+ Options:
+-  --self                  Update pi only (default when no target is given)
++  --self                  Update ${APP_NAME} only (default when no target is given)
+   --extensions            Update installed packages only
+   --models                Refresh model catalogs only
+-  --all                   Update pi and installed packages
++  --all                   Update ${APP_NAME} and installed packages
+   --extension <source>    Update one package only
+   -a, --approve           Trust project-local files for this command
+   -na, --no-approve       Ignore project-local files for this command
+-  --force                 Reinstall pi even if the current version is latest
++  --force                 Reinstall ${APP_NAME} even if the current version is latest
+ 
+ Short forms:
+-  ${APP_NAME} update                Update pi only
+-  ${APP_NAME} update --all          Update pi and all extensions
++  ${APP_NAME} update                Update ${APP_NAME} only
++  ${APP_NAME} update --all          Update ${APP_NAME} and all extensions
+   ${APP_NAME} update --models       Refresh model catalogs only
+   ${APP_NAME} update <source>       Update one package
+-  ${APP_NAME} update pi             Update pi only (self works as alias to pi)
++  ${APP_NAME} update self           Update ${APP_NAME} only
+ `);
+ 			return;
+ 
 @@ -642,7 +642,7 @@ function printSelfUpdateUnavailable(
  	console.error(`error: ${APP_NAME} cannot self-update this installation.`);
  	console.error(getSelfUpdateUnavailableInstruction(PACKAGE_NAME, npmCommand, updatePackageTarget));

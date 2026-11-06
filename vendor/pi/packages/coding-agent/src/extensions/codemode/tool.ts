@@ -159,7 +159,8 @@ const DESCRIPTION_INTRO = `Run one script that calls several tools. The input is
 - A script earns its turn by doing several calls. Batch independent ones with \`Promise.allSettled\`; loop when the data decides the next call. **A script with one call costs more than calling the tool once** — measured at +40% tokens on small tasks — so do it directly instead.
 - First line, optional: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\` (\`// @script:\` is an alias). \`startInBackground\` continues the script after the tool returns.
 - Long input text (a file body, a patch, a heredoc) goes in an input block instead of inside the code: \`// @input: patch <<'EOF'\` then the text, then a line with only \`EOF\`. Read it as \`inputs.patch\`. Blocks must be closed and are removed before the script runs.
-- Every tool you have is listed below with its arguments. Plan the whole sequence before the first call: a turn re-sends the prompt, so dependent steps belong in one script.
+- Only \`script\` is declared: that is the design. Every callable tool is listed below; never run \`reef help\` or read the bundle to find them.
+- Plan the whole sequence before the first call; one command per script wastes a turn.
 - A new deliverable needs no inspection first. \`write\` creates its folders and reports the size, so write the file and read the result instead of listing the directory to see what exists.
 - Create files with \`tools.write\`, change them with \`tools.edit\` — not shell redirection or \`sed -i\`.
 - A call's own result is its verification: do not re-read a file you just wrote, or re-measure what a tool just reported.`;
